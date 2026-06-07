@@ -1,0 +1,271 @@
+"""
+pipeline.py
+-----------
+T24 Generic Adapter - Master Pipeline Orchestrator
+
+Ties all modules together into a single, end-to-end pipeline.
+
+Pipeline stages (in order):
+1. Validate package  (T24PackageValidator)
+2. Discover apps     (T24PackageDiscovery)
+3. Load metadata     (T24MetadataOrchestrator)
+4. Stream records    (T24StreamingDataReader)
+5. Normalize fields  (T24Normalizer)
+6. Yield output      (Iterator[NormalizedField])
+
+The pipeline is a Python generator: it yields one NormalizedField
+at a time, so memory usage is constant regardless of file size.
+
+Usage
+-----
+from pathlib import Path
+from t24_adapter.config import T24PipelineConfig
+from t24_adapter.pipeline import T24GenericPipeline
+from t24_adapter.sinks import NormalizedOutputWriter
+
+config = T24PipelineConfig(package_root=Path("t24_input_package"))
+pipeline = T24GenericPipeline(config)
+
+NormalizedOutputWriter.write_csv(
+    rows=pipeline.run(),
+    output_file=Path("output/result.csv")
+)
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Iterator, Optional
+
+from .config import T24PipelineConfig
+from .discovery import T24PackageDiscovery
+from .metadata_loaders import (
+    CustomizationLoader,
+    LocalReferenceLoader,
+    RelationshipLoader,
+    StandardSelectionLoader,
+)
+from .metadata_registry import T24MetadataRegistry
+from .models import NormalizedField
+from .normalizer import T24Normalizer
+from .reader import T24StreamingDataReader
+from .validation import T24PackageValidator
+
+logger = logging.getLogger("t24-adapter.pipeline")
+
+
+class T24MetadataOrchestrator:
+    """
+    Loads all metadata sources for a given T24 application.
+
+    Load order (later sources override earlier if same position):
+    1. STANDARD.SELECTION (core field definitions)
+    2. LOCAL.REF           (local reference field extensions)
+    3. CUSTOMIZATION       (bank-specific custom fields)
+    4. RELATIONSHIPS       (explicit foreign key relationships)
+
+    The orchestrator also validates that local reference metadata
+    is accessible before data extraction begins.
+    """
+
+    def __init__(
+        self,
+        config: T24PipelineConfig,
+        discovery: T24PackageDiscovery
+    ):
+        self.config = config
+        self.discovery = discovery
+        self.registry = T24MetadataRegistry()
+
+    def load_for_application(self, app_name: str) -> T24MetadataRegistry:
+        """
+        Load all available metadata for one T24 application.
+
+        Parameters
+        ----------
+        app_name : T24 application name (e.g. "CUSTOMER")
+
+        Returns
+        -------
+        T24MetadataRegistry populated with all available metadata
+        """
+        standard_file = self.discovery.get_metadata_file(app_name)
+        local_ref_file = self.discovery.get_local_ref_file(app_name)
+        customization_file = self.discovery.get_customization_file(app_name)
+        relationship_file = self.discovery.get_relationship_file(app_name)
+
+        # --- STANDARD.SELECTION (required if configured) ---
+        if self.config.require_standard_selection and not standard_file:
+            raise FileNotFoundError(
+                f"Missing STANDARD.SELECTION metadata for application: {app_name}. "
+                f"Expected in: {self.config.metadata_path()}"
+            )
+
+        if standard_file:
+            StandardSelectionLoader().load(app_name, standard_file, self.registry)
+
+        # --- LOCAL.REF (optional but logged if absent) ---
+        if local_ref_file:
+            LocalReferenceLoader().load(app_name, local_ref_file, self.registry)
+        else:
+            logger.warning(
+                f"No LOCAL.REF file found for {app_name}. "
+                f"Local reference fields (c64 m-values) may appear as FIELD_64.N "
+                f"unless they are already defined in STANDARD.SELECTION."
+            )
+
+        # --- CUSTOMIZATION (optional) ---
+        if customization_file:
+            CustomizationLoader().load(app_name, customization_file, self.registry)
+
+        # --- RELATIONSHIPS (optional or required) ---
+        if relationship_file:
+            RelationshipLoader().load(app_name, relationship_file, self.registry)
+        elif self.config.require_relationships:
+            raise FileNotFoundError(
+                f"Missing relationship metadata for application: {app_name}"
+            )
+
+        # --- Validate local reference accessibility ---
+        self._validate_local_ref_coverage(app_name)
+
+        logger.info(self.registry.summary(app_name))
+        return self.registry
+
+    def _validate_local_ref_coverage(self, app_name: str) -> None:
+        """
+        Log a warning if no local reference metadata is registered.
+        This prevents silent wrong mapping when data contains c64 m-values.
+        """
+        local_ref_fields = self.registry.list_local_ref_fields(app_name)
+
+        if not local_ref_fields:
+            logger.warning(
+                f"[{app_name}] No local reference metadata detected. "
+                f"If data contains c64 m-values, they will be emitted as FIELD_64.N. "
+                f"Add metadata in local_ref/ or metadata/ to resolve them."
+            )
+        else:
+            logger.info(
+                f"[{app_name}] {len(local_ref_fields)} local reference field(s) registered "
+                f"and accessible for lookup."
+            )
+
+
+class T24GenericPipeline:
+    """
+    End-to-end T24 XML data extraction and normalization pipeline.
+
+    This is the main entry point for all pipeline operations.
+    It is a generator-based pipeline: calling run() returns a lazy
+    iterator that produces one NormalizedField at a time.
+
+    Parameters
+    ----------
+    config : T24PipelineConfig - all pipeline settings
+
+    Usage
+    -----
+    config = T24PipelineConfig(package_root=Path("t24_input_package"))
+    pipeline = T24GenericPipeline(config)
+
+    for field in pipeline.run():
+        print(field.field_name, field.value)
+    """
+
+    def __init__(self, config: T24PipelineConfig):
+        self.config = config
+        self.validator = T24PackageValidator(config)
+        self.discovery = T24PackageDiscovery(config)
+        self.reader = T24StreamingDataReader()
+
+    def run(self) -> Iterator[NormalizedField]:
+        """
+        Execute the full pipeline and yield NormalizedField records.
+
+        Stages:
+        1. Validate package structure and XML well-formedness
+        2. Discover T24 applications from data directory
+        3. For each application:
+           a. Load all metadata (STANDARD.SELECTION, LOCAL.REF, CUSTOMIZATION, RELATIONSHIPS)
+           b. Stream data records from XML
+           c. Normalize each record
+           d. Yield each NormalizedField
+
+        Raises
+        ------
+        RuntimeError if package validation fails
+        FileNotFoundError if required metadata is missing
+        """
+
+        # === STAGE 1: Package Validation ===
+        logger.info("=== STAGE 1: Package Validation ===")
+        validation_result = self.validator.validate_package()
+
+        if not validation_result.is_valid:
+            for error in validation_result.errors:
+                logger.error(error)
+            raise RuntimeError(
+                f"T24 package validation failed with {len(validation_result.errors)} error(s). "
+                f"Check logs for details."
+            )
+
+        for warning in validation_result.warnings:
+            logger.warning(warning)
+
+        # === STAGE 2: Application Discovery ===
+        logger.info("=== STAGE 2: Application Discovery ===")
+        applications = self.discovery.discover_applications()
+
+        if not applications:
+            raise RuntimeError(
+                "No T24 XML data files found in the data directory. "
+                "Ensure data/*.xml files exist."
+            )
+
+        logger.info(f"Applications to process: {applications}")
+
+        # === STAGE 3-5: Per-Application Processing ===
+        metadata_orchestrator = T24MetadataOrchestrator(
+            config=self.config,
+            discovery=self.discovery
+        )
+
+        for app_name in applications:
+            logger.info(f"=== Processing Application: {app_name} ===")
+
+            data_file = self.discovery.get_data_file(app_name)
+            if not data_file:
+                logger.warning(f"Data file not found for {app_name}, skipping.")
+                continue
+
+            # === STAGE 3: Load Metadata ===
+            logger.info(f"--- Stage 3: Loading Metadata for {app_name} ---")
+            registry = metadata_orchestrator.load_for_application(app_name)
+
+            # === STAGE 4 & 5: Stream + Normalize ===
+            logger.info(f"--- Stage 4+5: Streaming and Normalizing {app_name} ---")
+            normalizer = T24Normalizer(registry=registry, config=self.config)
+
+            record_count = 0
+            field_count = 0
+
+            for record in self.reader.stream_records(data_file):
+                record_count += 1
+                normalized_fields = normalizer.normalize_record(
+                    app_name=app_name,
+                    row=record,
+                    source_file=str(data_file)
+                )
+
+                for normalized_field in normalized_fields:
+                    field_count += 1
+                    yield normalized_field
+
+            logger.info(
+                f"Completed {app_name}: {record_count} record(s), "
+                f"{field_count} normalized field(s)"
+            )
+
+        logger.info("=== Pipeline Complete ===")
