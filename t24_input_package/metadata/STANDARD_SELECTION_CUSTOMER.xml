@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ROW>
+    <C1>MNEMONIC</C1>
+    <C1>SHORT.NAME</C1>
+    <C1>NAME.1</C1>
+    <C1>NAME.2</C1>
+    <C1>STREET</C1>
+    <C1>ADDRESS</C1>
+    <C1>TOWN.COUNTRY</C1>
+    <C1>POST.CODE</C1>
+    <C1>COUNTRY</C1>
+    <C1>LANGUAGE</C1>
+    <C1>SECTOR</C1>
+    <C1>INDUSTRY</C1>
+    <C1>ACCOUNT.OFFICER</C1>
+    <C1>TARGET</C1>
+    <C1>NATIONALITY</C1>
+    <C1>RESIDENCE</C1>
+    <C1>CO-RESIDENT.WITH</C1>
+    <C1>CONFID.TXT</C1>
+    <C1>OFF.PHONE</C1>
+    <C1>PHONE.3</C1>
+    <C1>SMS.1</C1>
+    <C1>EMAIL.1</C1>
+    <C1>FAX.1</C1>
+    <C1>TELEX.NO</C1>
+    <C1>INTRODUCER</C1>
+    <C1>CUSTOMER.STATUS</C1>
+    <C1>MARITAL.STATUS</C1>
+    <C1>GENDER</C1>
+    <C1>DATE.OF.BIRTH</C1>
+    <C1>LEGAL.ID</C1>
+    <C1>CUST.SEGMENT</C1>
+    <C1>CUST.TIER</C1>
+    <C1>TAX.ID</C1>
+    <C1>KYC.REVIEW.DATE</C1>
+
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2><C2>SYS</C2>
+    <C2>USR</C2><C2>USR</C2><C2>USR</C2><C2>USR</C2>
+
+    <C3>1</C3><C3>2</C3><C3>3</C3><C3>4</C3><C3>5</C3>
+    <C3>6</C3><C3>7</C3><C3>8</C3><C3>9</C3><C3>10</C3>
+    <C3>11</C3><C3>12</C3><C3>13</C3><C3>14</C3><C3>15</C3>
+    <C3>16</C3><C3>17</C3><C3>18</C3><C3>19</C3><C3>20</C3>
+    <C3>21</C3><C3>22</C3><C3>23</C3><C3>24</C3><C3>25</C3>
+    <C3>26</C3><C3>27</C3><C3>28</C3><C3>29</C3><C3>30</C3>
+    <C3>64.1</C3><C3>64.2</C3><C3>64.3</C3><C3>64.4</C3>
+
+    <C4>A</C4><C4>A</C4><C4>A</C4><C4>A</C4><C4>A</C4>
+    <C4>A</C4><C4>A</C4><C4>A</C4><C4>R</C4><C4>R</C4>
+    <C4>R</C4><C4>R</C4><C4>R</C4><C4>R</C4><C4>R</C4>
+    <C4>R</C4><C4>R</C4><C4>A</C4><C4>A</C4><C4>A</C4>
+    <C4>A</C4><C4>A</C4><C4>A</C4><C4>A</C4><C4>A</C4>
+    <C4>R</C4><C4>R</C4><C4>A</C4><C4>D</C4><C4>A</C4>
+    <C4>A</C4><C4>A</C4><C4>A</C4><C4>D</C4>
+
+    <C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5>
+    <C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2GGG</C5><C5>IN2</C5>
+    <C5>IN2</C5><C5>IN2</C5><C5>IN2DAO</C5><C5>IN2</C5><C5>IN2GGG</C5>
+    <C5>IN2GGG</C5><C5>IN2CUS</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5>
+    <C5>IN2A</C5><C5>IN2EM</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5>
+    <C5>IN2</C5><C5>IN2</C5><C5>IN2A</C5><C5>IN2D</C5><C5>IN2A</C5>
+    <C5>IN2A</C5><C5>IN2A</C5><C5>IN2A</C5><C5>IN2D</C5>
+
+    <C6>10.1</C6><C6>35.1</C6><C6>35.1</C6><C6>35.1</C6><C6>35.1</C6>
+    <C6>35.1</C6><C6>35.1</C6><C6>10.1</C6><C6>2.1</C6><C6>1.1</C6>
+    <C6>4.1</C6><C6>4.1</C6><C6>4.1</C6><C6>4.1</C6><C6>2.1</C6>
+    <C6>2.1</C6><C6>10.1</C6><C6>3.1</C6><C6>15.1</C6><C6>15.1</C6>
+    <C6>15.1</C6><C6>50.1</C6><C6>15.1</C6><C6>15.1</C6><C6>10.1</C6>
+    <C6>4.1</C6><C6>2.1</C6><C6>7.1</C6><C6>11.1</C6><C6>20.1</C6>
+    <C6>15.1</C6><C6>10.1</C6><C6>20.1</C6><C6>11.1</C6>
+
+    <C7>SINGLE</C7><C7>MULTI</C7><C7>MULTI</C7><C7>SINGLE</C7><C7>MULTI</C7>
+    <C7>MULTI</C7><C7>MULTI</C7><C7>MULTI</C7><C7>MULTI</C7><C7>SINGLE</C7>
+    <C7>SINGLE</C7><C7>SINGLE</C7><C7>SINGLE</C7><C7>SINGLE</C7><C7>SINGLE</C7>
+    <C7>SINGLE</C7><C7>SINGLE</C7><C7>MULTI</C7><C7>MULTI</C7><C7>SINGLE</C7>
+    <C7>MULTI</C7><C7>MULTI</C7><C7>SINGLE</C7><C7>SINGLE</C7><C7>MULTI</C7>
+    <C7>SINGLE</C7><C7>SINGLE</C7><C7>SINGLE</C7><C7>SINGLE</C7><C7>MULTI</C7>
+    <C7>SINGLE</C7><C7>SINGLE</C7><C7>MULTI</C7><C7>SINGLE</C7>
+
+    <C8></C8><C8></C8><C8></C8><C8></C8><C8></C8>
+    <C8></C8><C8></C8><C8></C8><C8>COUNTRY</C8><C8>LANGUAGE</C8>
+    <C8>SECTOR</C8><C8>INDUSTRY</C8><C8>DEPT.ACCT.OFFICER</C8><C8>TARGET</C8><C8>COUNTRY</C8>
+    <C8>COUNTRY</C8><C8>CUSTOMER</C8><C8></C8><C8></C8><C8></C8>
+    <C8></C8><C8></C8><C8></C8><C8></C8><C8></C8>
+    <C8>CUSTOMER.STATUS</C8><C8>MARITAL.STATUS</C8><C8></C8><C8></C8><C8></C8>
+    <C8></C8><C8></C8><C8></C8><C8></C8>
+
+    <C9>L</C9><C9>L</C9><C9>L</C9><C9>L</C9><C9>L</C9>
+    <C9>L</C9><C9>L</C9><C9>L</C9><C9>L</C9><C9>R</C9>
+    <C9>R</C9><C9>R</C9><C9>R</C9><C9>R</C9><C9>L</C9>
+    <C9>L</C9><C9>R</C9><C9>L</C9><C9>L</C9><C9>L</C9>
+    <C9>L</C9><C9>L</C9><C9>L</C9><C9>L</C9><C9>L</C9>
+    <C9>R</C9><C9>L</C9><C9>L</C9><C9>R</C9><C9>L</C9>
+    <C9>L</C9><C9>L</C9><C9>L</C9><C9>R</C9>
+
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+    <C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10><C10>INPUT</C10>
+
+    <C11>Mnemonic code</C11>
+    <C11>Short name display</C11>
+    <C11>Legal Name Line 1</C11>
+    <C11>Legal Name Line 2</C11>
+    <C11>Street address lane</C11>
+    <C11>Address Line 2</C11>
+    <C11>Town and City data</C11>
+    <C11>Postal or zip code</C11>
+    <C11>Country code location</C11>
+    <C11>Language key profile</C11>
+    <C11>Customer business sector</C11>
+    <C11>Industry classification code</C11>
+    <C11>Assigned Account officer</C11>
+    <C11>Target classification tier</C11>
+    <C11>Country of nationality</C11>
+    <C11>Country of residence</C11>
+    <C11>Co-resident with code</C11>
+    <C11>Confidential text flag</C11>
+    <C11>Office telephone number</C11>
+    <C11>Third telephone line</C11>
+    <C11>SMS message telephone</C11>
+    <C11>Customer email accounts</C11>
+    <C11>Primary fax number</C11>
+    <C11>Telex delivery number</C11>
+    <C11>Introducing officer link</C11>
+    <C11>Customer active status</C11>
+    <C11>Marital status key</C11>
+    <C11>Gender profile code</C11>
+    <C11>Date of birth</C11>
+    <C11>Identification tracking number</C11>
+    <C11>Custom local customer segment</C11>
+    <C11>Custom local service level tier</C11>
+    <C11>Custom local tax identification number</C11>
+    <C11>Custom local compliance review target date</C11>
+</ROW>
