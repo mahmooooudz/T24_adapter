@@ -1,0 +1,9 @@
+cd t24_adapter
+
+git init
+git add .
+git commit -m "Initial commit: T24 Generic Adapter Pipeline"
+
+git remote add origin https://github.com/YOUR_USERNAME/t24-generic-adapter.git
+git branch -M main
+git push -u origin main
