@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DATA>
+    <row>
+        <c1>JD1009</c1>
+        <c2 m="1">John Doe</c2>
+        <c3 m="1">Johnathan Doe</c3>
+        <c5 m="1">123 Financial Wall Street</c5>
+        <c6 m="1">Suite 400</c6>
+        <c7 m="1">New York</c7>
+        <c8 m="1">10005</c8>
+        <c9 m="1">US</c9>
+        <c10>1</c10>
+        <c11>1000</c11>
+        <c12>1000</c12>
+        <c13>10</c13>
+        <c14>1</c14>
+        <c15>US</c15>
+        <c16>US</c16>
+        <c18 m="1">NO</c18>
+        <c19 m="1">+1234567890</c19>
+        <c21 m="1">+1987654321</c21>
+        <c22 m="1">john.doe@example.com</c22>
+        <c25 m="1">STAFF-01</c25>
+        <c27>M</c27>
+        <c28>MALE</c28>
+        <c29>19851015</c29>
+        <c30 m="1">DL-987654321</c30>
+        <c64 m="1">SEGMENT-A</c64>
+        <c64 m="2">VIP-GOLD</c64>
+        <c64 m="3" s="1">TX-998822</c64>
+        <c64 m="3" s="2">TX-445511</c64>
+        <c64 m="4">20261231</c64>
+        <c176 m="1">124_USER_INPUTTER_I</c176>
+        <c177>1</c177>
+        <c178 m="1">2606021336</c178>
+        <c179>124_USER_AUTHORISER</c179>
+        <c180>US0010001</c180>
+        <c181>1</c181>
+    </row>
+    <row>
+        <c1>JS2050</c1>
+        <c2 m="1">Jane Smith</c2>
+        <c3 m="1">Jane Elizabeth Smith</c3>
+        <c5 m="1">456 Commerce Avenue</c5>
+        <c7 m="1">Los Angeles</c7>
+        <c8 m="1">90001</c8>
+        <c9 m="1">US</c9>
+        <c10>1</c10>
+        <c11>2000</c11>
+        <c15>US</c15>
+        <c16>US</c16>
+        <c22 m="1">jane.smith@example.com</c22>
+        <c28>FEMALE</c28>
+        <c29>19900322</c29>
+        <c64 m="1">SEGMENT-B</c64>
+        <c64 m="2">STANDARD</c64>
+        <c64 m="3" s="1">TX-112233</c64>
+        <c64 m="4">20271231</c64>
+        <c176 m="1">124_USER_INPUTTER_I</c176>
+        <c177>1</c177>
+    </row>
+</DATA>
