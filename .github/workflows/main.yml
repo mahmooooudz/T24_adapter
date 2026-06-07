@@ -1,4 +1,4 @@
-name: Run Python Script
+name: Run T24 Pipeline
 
 on:
   workflow_dispatch:
@@ -8,19 +8,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas
+          pip install pandas tabulate
 
-      - name: Run Script
+      - name: Run pipeline
         run: |
           python main.py
+
+      - name: Upload output files
+        uses: actions/upload-artifact@v4
+        with:
+          name: t24-output
+          path: output/
