@@ -3,7 +3,8 @@ main.py
 -------
 T24 Generic Adapter - Example Entry Point
 
-Demonstrates full pipeline execution with CSV, JSONL, and DataFrame output.
+Demonstrates full pipeline execution with WIDE-table output:
+one row per record, each field_name as a column. One file per application.
 
 Run with:
     python main.py
@@ -21,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from t24_adapter import (
     T24GenericPipeline,
     T24PipelineConfig,
-    NormalizedOutputWriter,
+    WidePivotWriter,
 )
 
 # ============================================================
@@ -76,54 +77,41 @@ def main():
     pipeline = T24GenericPipeline(config)
 
     # ============================================================
-    # 3. Output paths
+    # 3. Output directory
     # ============================================================
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 
-    csv_output = output_dir / "normalized_t24_output.csv"
-    jsonl_output = output_dir / "normalized_t24_output.jsonl"
+    # ============================================================
+    # 4. Write WIDE output (one file per application)
+    #    Two-pass streaming: constant memory regardless of file size.
+    # ============================================================
+    writer = WidePivotWriter()
+
+    logger.info("Writing wide CSV output...")
+    csv_outputs = writer.write_csv(pipeline, output_dir)
+    for app_name, path in csv_outputs.items():
+        logger.info(f"  {app_name}: {path}")
+
+    logger.info("Writing wide JSONL output...")
+    jsonl_outputs = writer.write_jsonl(pipeline, output_dir)
+    for app_name, path in jsonl_outputs.items():
+        logger.info(f"  {app_name}: {path}")
 
     # ============================================================
-    # 4. Write CSV output (streaming - constant memory usage)
-    # ============================================================
-    logger.info("Writing CSV output...")
-    csv_rows = NormalizedOutputWriter.write_csv(
-        rows=pipeline.run(),
-        output_file=csv_output,
-    )
-    logger.info(f"CSV written: {csv_output} ({csv_rows} rows)")
-
-    # ============================================================
-    # 5. Write JSONL output (re-run pipeline - it's a generator)
-    # ============================================================
-    logger.info("Writing JSONL output...")
-    jsonl_rows = NormalizedOutputWriter.write_jsonl(
-        rows=pipeline.run(),
-        output_file=jsonl_output,
-    )
-    logger.info(f"JSONL written: {jsonl_output} ({jsonl_rows} rows)")
-
-    # ============================================================
-    # 6. Print preview table (requires pandas)
+    # 5. Print preview table (requires pandas)
     # ============================================================
     logger.info("Printing preview table...")
     try:
-        import pandas as pd
-        df = NormalizedOutputWriter.to_dataframe(pipeline.run())
-        print("\n=== Normalized T24 Output (first 30 rows) ===\n")
-
-        display_cols = [
-            "app_name", "record_id", "xml_element",
-            "resolved_position", "field_name",
-            "mv_index", "sv_index", "value", "is_mapped"
-        ]
-        print(df[display_cols].head(30).to_markdown(index=False))
-        print(f"\nTotal rows: {len(df)}")
-        print(f"Total unique records: {df['record_id'].nunique()}")
-        print(f"Mapped fields: {df['is_mapped'].sum()}")
-        print(f"Unmapped fields: {(~df['is_mapped']).sum()}")
-
+        import pandas as pd  # noqa: F401
+        for app_name in csv_outputs:
+            df = writer.to_dataframe(pipeline, app_name)
+            print(f"\n=== Wide Output: {app_name} (first 30 rows) ===\n")
+            # disable_numparse: T24 values are strings (phones, IDs); keep them
+            # verbatim instead of letting the table renderer coerce to floats.
+            print(df.head(30).to_markdown(index=False, disable_numparse=True))
+            print(f"\nTotal records: {len(df)}")
+            print(f"Total columns: {len(df.columns)}")
     except ImportError:
         logger.warning("pandas not installed. Skipping preview table.")
 

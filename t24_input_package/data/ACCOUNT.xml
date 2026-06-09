@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DATA>
+    <row>
+        <c1>ACC001</c1>
+        <c2>JD1009</c2>
+        <c3>6001</c3>
+        <c4 m="1">Café Doe, John - Current A/C</c4>
+        <c5>USD</c5>
+        <c6>20200115</c6>
+        <c7>15000.50</c7>
+        <c8>14999.00</c8>
+        <c12 m="1">OFF-10</c12>
+        <c12 m="2">OFF-22</c12>
+        <c12 m="3">OFF-31</c12>
+        <c64 m="1">PREMIER</c64>
+        <c64 m="2">LOW</c64>
+        <c64 m="3" s="1">2.50</c64>
+        <c64 m="3" s="2">2.75</c64>
+        <c64 m="4">EXTRA-UNMAPPED</c64>
+        <c200>raw-audit-value</c200>
+    </row>
+    <row>
+        <c1>ACC002</c1>
+        <c2>JS2050</c2>
+        <c3>6001</c3>
+        <c4 m="1"></c4>
+        <c5>EUR</c5>
+        <c7>500.00</c7>
+        <c12 m="1">OFF-10</c12>
+        <c64 m="1">STANDARD</c64>
+        <c64 m="3" s="1">1.10</c64>
+    </row>
+    <row>
+        <c1>ACC003</c1>
+        <c2>JD1009</c2>
+        <c4 m="1">Smith "Jr" | Holdings</c4>
+        <c7>0</c7>
+        <c64 m="2">HIGH</c64>
+    </row>
+</DATA>

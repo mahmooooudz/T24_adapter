@@ -20,6 +20,7 @@ from .config import T24PipelineConfig
 from .models import FieldMetadata, NormalizedField, RelationshipMetadata, FileValidationResult
 from .pipeline import T24GenericPipeline, T24MetadataOrchestrator
 from .sinks import NormalizedOutputWriter
+from .wide_writer import WidePivotWriter
 from .metadata_registry import T24MetadataRegistry
 from .metadata_loaders import (
     StandardSelectionLoader,
@@ -43,6 +44,7 @@ __all__ = [
     "T24PackageValidator",
     "T24PackageDiscovery",
     "NormalizedOutputWriter",
+    "WidePivotWriter",
     "StandardSelectionLoader",
     "LocalReferenceLoader",
     "CustomizationLoader",
