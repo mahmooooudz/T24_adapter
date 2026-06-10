@@ -85,7 +85,8 @@ class T24Normalizer:
         self,
         app_name: str,
         row: ET.Element,
-        source_file: str
+        source_file: str,
+        record_id: Optional[str] = None,
     ) -> List[NormalizedField]:
         """
         Normalize all XML elements in a <row> into NormalizedField records.
@@ -95,12 +96,15 @@ class T24Normalizer:
         app_name    : T24 application name (e.g. "CUSTOMER")
         row         : ET.Element representing the <row>
         source_file : Source XML file path string (for traceability)
+        record_id   : Explicit primary key (e.g. the database recordId column).
+                      When None, it is derived from a field position.
 
         Returns
         -------
         List[NormalizedField] - one entry per XML element in the row
         """
-        record_id = self._extract_record_id(row)
+        if record_id is None:
+            record_id = self._extract_record_id(row, app_name)
         output: List[NormalizedField] = []
 
         for child in row:
@@ -229,21 +233,27 @@ class T24Normalizer:
 
         return warnings
 
-    @staticmethod
-    def _extract_record_id(row: ET.Element) -> Optional[str]:
+    def _extract_record_id(self, row: ET.Element, app_name: str) -> Optional[str]:
         """
-        Extract the primary record identifier.
+        Extract the primary record identifier for one record.
 
-        Convention: The value of the first c1 element is the record ID.
-        This holds for all standard T24 applications.
+        The key field position is configurable per application via
+        config.record_id_positions (e.g. {"ACCOUNT": "2"} to key ACCOUNT on
+        ACCOUNT.NO). Applications not listed use record_id_default_position
+        ("1"), which is the T24 default (the first field, e.g. CUSTOMER's
+        MNEMONIC).
 
-        For applications that use a different primary key structure,
-        override this method in a subclass.
+        This avoids the wrong assumption that field 1 is always the key: in
+        ACCOUNT, field 1 is CUSTOMER (the holder), not the account itself.
         """
+        positions = self.config.record_id_positions or {}
+        key_position = positions.get(
+            app_name.upper(), self.config.record_id_default_position
+        )
         for child in row:
             pos = XmlUtils.extract_numeric_position_from_tag(
                 XmlUtils.strip_namespace(child.tag)
             )
-            if pos == "1":
+            if pos == key_position:
                 return XmlUtils.text(child)
         return None

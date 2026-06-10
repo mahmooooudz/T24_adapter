@@ -82,16 +82,19 @@ def main():
         # ----------------------------------------------------------------
         source="database",
         db_schema="t24_adaptor",
-        db_tables={"ACCOUNT": "FBANK_Account"},
         db_record_column="xmlRecord",
 
-        # STANDARD.SELECTION metadata also from the database.
-        # Requires the table created by migrations/001_standard_selection.sql.
-        # Until that migration is run, the loader falls back to the XML files
-        # (with a warning), so this is safe to enable now.
+        # Applications are discovered dynamically from the schema: every table
+        # except the metadata table is one application, keyed by its own name.
+        # The metadata row in STANDARD_SELECTION shares that same name.
         db_metadata_table="STANDARD_SELECTION",
-        db_metadata_key_column="appName",
+        db_metadata_key_column="recordId",
         db_metadata_xml_column="xmlRecord",
+
+        # record_id = the table's own recordId column (1, 2, 3 ...), so each
+        # account is its own record and a customer can own many accounts.
+        record_id_from_db_column=True,
+        record_id_db_column="recordId",
     )
 
     # ============================================================

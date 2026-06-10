@@ -57,7 +57,7 @@ logger = logging.getLogger("t24-adapter.wide")
 
 
 # Leading columns present in every wide row, before the field columns.
-LEADING_COLUMNS = ["record_id", "app_name"]
+LEADING_COLUMNS = ["recordId", "app_name"]
 
 # Sentinel marking "no record started yet" — distinct from a real record_id
 # of None, so a stream of None-keyed records still produces rows.
@@ -278,7 +278,7 @@ class WidePivotWriter:
 
         def new_row(record_id: Optional[str]) -> Dict[str, str]:
             row_dict = {col: "" for col in schema.columns}
-            row_dict["record_id"] = record_id if record_id is not None else ""
+            row_dict["recordId"] = record_id if record_id is not None else ""
             row_dict["app_name"] = app_name
             return row_dict
 

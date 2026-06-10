@@ -103,21 +103,40 @@ class T24PipelineConfig:
     # DB_URL, or DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD.
     db_schema: str = "t24_adaptor"
 
-    # Maps application name -> source table name, e.g. {"ACCOUNT": "FBANK_Account"}.
-    # The application name is used to locate metadata files on disk.
-    db_tables: Optional[Dict[str, str]] = None
+    # Applications are discovered dynamically: every base table in db_schema
+    # (except db_metadata_table) is one application, keyed by its own table
+    # name. The table name is also the metadata row key — table and metadata
+    # row share the same name, so no app->table mapping is hardcoded.
 
     # Name of the column holding each record's XML.
     db_record_column: str = "xmlRecord"
 
     # Optional: load STANDARD.SELECTION metadata from a database table
-    # (same schema) instead of files. One row per application:
-    #   <db_metadata_key_column> (e.g. appName) | <db_metadata_xml_column> (xmlRecord)
-    # When None, metadata is always read from files. When set, the DB is tried
-    # first and falls back to files (with a warning) if the table/row is absent.
+    # (same schema). One row per application, keyed by the table name:
+    #   <db_metadata_key_column> (recordId) | <db_metadata_xml_column> (xmlRecord)
+    # When None, metadata is read from files. When set, the DB is tried first
+    # and falls back to files (with a warning) if the table/row is absent.
     db_metadata_table: Optional[str] = None
-    db_metadata_key_column: str = "appName"
+    db_metadata_key_column: str = "recordId"
     db_metadata_xml_column: str = "xmlRecord"
+
+    # ------------------------------------------------------------------ #
+    # Record identity
+    # ------------------------------------------------------------------ #
+    # Which field position holds the primary key, per application. T24's
+    # default is field 1, but that is not always the record's own key:
+    # for ACCOUNT, field 1 is CUSTOMER (the holder), while the account's
+    # key is ACCOUNT.NO at position 2. Map app -> position to override.
+    #   e.g. {"ACCOUNT": "2"}  ->  record_id = ACCOUNT.NO
+    record_id_positions: Optional[Dict[str, str]] = None
+    record_id_default_position: str = "1"
+
+    # In database mode, use the table's own record-id column as record_id
+    # (the canonical per-record key, e.g. 1, 2, 3 ...). When True this takes
+    # precedence over record_id_positions. Set False to derive record_id from
+    # a field position instead.
+    record_id_from_db_column: bool = True
+    record_id_db_column: str = "recordId"
 
     def resolve(self, relative_dir: str) -> Path:
         """Return absolute path for a subdirectory under package_root."""

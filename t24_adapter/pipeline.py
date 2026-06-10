@@ -228,6 +228,7 @@ class T24GenericPipeline:
             T24DatabaseDataReader(
                 schema=config.db_schema,
                 record_column=config.db_record_column,
+                record_id_column=config.record_id_db_column,
             )
             if config.source == "database"
             else None
@@ -270,11 +271,15 @@ class T24GenericPipeline:
         # === STAGE 2: Application Discovery ===
         logger.info("=== STAGE 2: Application Discovery ===")
         if self.config.source == "database":
-            applications = sorted((self.config.db_tables or {}).keys())
+            # Dynamic: every base table in the schema (except the metadata
+            # table) is an application, keyed by its own name. No hardcoding.
+            applications = self.db_reader.discover_tables(
+                exclude={self.config.db_metadata_table}
+            )
             if not applications:
                 raise RuntimeError(
-                    "Database source selected but config.db_tables is empty. "
-                    "Provide an app -> table mapping, e.g. {'ACCOUNT': 'FBANK_Account'}."
+                    f"No data tables found in schema '{self.config.db_schema}' "
+                    f"(excluding metadata table '{self.config.db_metadata_table}')."
                 )
         else:
             applications = self.discovery.discover_applications()
@@ -295,18 +300,29 @@ class T24GenericPipeline:
         for app_name in applications:
             logger.info(f"=== Processing Application: {app_name} ===")
 
-            # Resolve the record source for this application.
+            # Resolve the record source for this application. Both branches
+            # produce a stream of (record_id, row_element) pairs. In database
+            # mode record_id is the DB recordId column; in file mode it is
+            # None (the normalizer then derives it from a field position).
             if self.config.source == "database":
-                table = self.config.db_tables[app_name]
-                record_stream = self.db_reader.stream_records(table)
-                source_label = f"{self.config.db_schema}.{table}"
+                # The application name IS the table name (and the metadata row
+                # name) — they share the same identifier by design.
+                record_stream = self.db_reader.stream_records(app_name)
+                source_label = f"{self.config.db_schema}.{app_name}"
             else:
                 data_file = self.discovery.get_data_file(app_name)
                 if not data_file:
                     logger.warning(f"Data file not found for {app_name}, skipping.")
                     continue
-                record_stream = self.reader.stream_records(data_file)
+                record_stream = (
+                    (None, elem) for elem in self.reader.stream_records(data_file)
+                )
                 source_label = str(data_file)
+
+            use_db_record_id = (
+                self.config.source == "database"
+                and self.config.record_id_from_db_column
+            )
 
             # === STAGE 3: Load Metadata ===
             logger.info(f"--- Stage 3: Loading Metadata for {app_name} ---")
@@ -319,12 +335,13 @@ class T24GenericPipeline:
             record_count = 0
             field_count = 0
 
-            for record in record_stream:
+            for db_record_id, record in record_stream:
                 record_count += 1
                 normalized_fields = normalizer.normalize_record(
                     app_name=app_name,
                     row=record,
-                    source_file=source_label
+                    source_file=source_label,
+                    record_id=db_record_id if use_db_record_id else None,
                 )
 
                 for normalized_field in normalized_fields:

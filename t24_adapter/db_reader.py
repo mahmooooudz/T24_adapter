@@ -88,10 +88,12 @@ class T24DatabaseDataReader:
         self,
         schema: str,
         record_column: str = "xmlRecord",
+        record_id_column: str = "recordId",
         batch_size: int = 1000,
     ):
         self.schema = schema
         self.record_column = record_column
+        self.record_id_column = record_id_column
         self.batch_size = batch_size
 
     # ------------------------------------------------------------------ #
@@ -102,13 +104,37 @@ class T24DatabaseDataReader:
         """Open a connection using environment variables (see _connect_from_env)."""
         return _connect_from_env()
 
+    def discover_tables(self, exclude=()) -> list:
+        """
+        Return the names of all base tables in the configured schema,
+        excluding any in `exclude` (e.g. the metadata table).
+
+        This is how data applications are discovered dynamically: each table
+        in the schema (other than the metadata table) is one application,
+        keyed by its own name. No application names are hardcoded.
+        """
+        exclude_set = set(exclude or ())
+        conn = _connect_from_env()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = %s AND table_type = 'BASE TABLE' "
+                    "ORDER BY table_name",
+                    (self.schema,),
+                )
+                names = [r[0] for r in cursor.fetchall()]
+        finally:
+            conn.close()
+        return [n for n in names if n not in exclude_set]
+
     # ------------------------------------------------------------------ #
     # Streaming
     # ------------------------------------------------------------------ #
 
-    def stream_records(self, table: str) -> Iterator[ET.Element]:
+    def stream_records(self, table: str) -> Iterator[tuple]:
         """
-        Stream all <row> elements from a T24-shaped database table.
+        Stream records from a T24-shaped database table.
 
         Parameters
         ----------
@@ -116,12 +142,13 @@ class T24DatabaseDataReader:
 
         Yields
         ------
-        ET.Element objects, one per <row> found inside each record's XML.
+        (record_id, ET.Element) tuples — the value of the recordId column
+        paired with each <row> element found inside that record's XML.
 
         Notes
         -----
         - Identifiers are safely quoted, so mixed-case names like
-          "FBANK_Account" and "xmlRecord" are handled correctly.
+          "FBANK_Account", "xmlRecord" and "recordId" are handled correctly.
         - A server-side cursor with itersize keeps memory constant.
         - The connection is always closed when iteration finishes.
         """
@@ -129,7 +156,7 @@ class T24DatabaseDataReader:
 
         logger.info(
             f"Streaming records from database: {self.schema}.{table} "
-            f"(column {self.record_column})"
+            f"(id {self.record_id_column}, column {self.record_column})"
         )
 
         conn = self._connect()
@@ -138,18 +165,21 @@ class T24DatabaseDataReader:
             # Named cursor => server-side streaming cursor.
             with conn.cursor(name="t24_record_stream") as cursor:
                 cursor.itersize = self.batch_size
-                query = sql.SQL("SELECT {col} FROM {schema}.{table}").format(
+                query = sql.SQL(
+                    "SELECT {id_col}, {col} FROM {schema}.{table}"
+                ).format(
+                    id_col=sql.Identifier(self.record_id_column),
                     col=sql.Identifier(self.record_column),
                     schema=sql.Identifier(self.schema),
                     table=sql.Identifier(table),
                 )
                 cursor.execute(query)
 
-                for (xml_value,) in cursor:
+                for record_id, xml_value in cursor:
                     if not xml_value or not str(xml_value).strip():
                         logger.warning(
-                            f"Empty {self.record_column} encountered in "
-                            f"{self.schema}.{table}; skipping row."
+                            f"Empty {self.record_column} for recordId="
+                            f"{record_id!r} in {self.schema}.{table}; skipping."
                         )
                         continue
 
@@ -157,10 +187,11 @@ class T24DatabaseDataReader:
                     if root is None:
                         continue
 
+                    rid = None if record_id is None else str(record_id)
                     for element in root.iter():
                         if XmlUtils.strip_namespace(element.tag).lower() == "row":
                             record_count += 1
-                            yield element
+                            yield (rid, element)
         finally:
             conn.close()
 
