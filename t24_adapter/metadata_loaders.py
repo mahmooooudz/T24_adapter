@@ -72,15 +72,53 @@ class StandardSelectionLoader:
         file_path: Path,
         registry: T24MetadataRegistry
     ) -> None:
+        """Load STANDARD.SELECTION metadata from an XML file."""
         logger.info(f"Loading STANDARD.SELECTION for '{app_name}' from: {file_path.name}")
-
         tree = ET.parse(file_path)
-        root = tree.getroot()
+        self._register_from_root(
+            app_name=app_name,
+            root=tree.getroot(),
+            registry=registry,
+            source=str(file_path),
+        )
+
+    def load_from_string(
+        self,
+        app_name: str,
+        xml_text: str,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
+        """
+        Load STANDARD.SELECTION metadata from an XML string (e.g. a database
+        column) instead of a file.
+
+        Encodes to bytes first because a str carrying an
+        `<?xml ... encoding=...?>` declaration cannot be passed to
+        ET.fromstring directly.
+        """
+        logger.info(f"Loading STANDARD.SELECTION for '{app_name}' from: {source}")
+        root = ET.fromstring(str(xml_text).encode("utf-8"))
+        self._register_from_root(
+            app_name=app_name,
+            root=root,
+            registry=registry,
+            source=source,
+        )
+
+    def _register_from_root(
+        self,
+        app_name: str,
+        root: ET.Element,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
+        """Shared logic: extract repeated C-columns from <ROW> and register fields."""
         row = XmlUtils.find_first_row(root)
 
         if row is None:
             raise ValueError(
-                f"No <ROW> element found in STANDARD.SELECTION file: {file_path}"
+                f"No <ROW> element found in STANDARD.SELECTION source: {source}"
             )
 
         columns = XmlUtils.extract_repeated_columns(row)
@@ -90,7 +128,7 @@ class StandardSelectionLoader:
         if not field_names or not positions:
             raise ValueError(
                 f"STANDARD.SELECTION must contain repeated <C1> (field names) "
-                f"and <C3> (positions): {file_path}"
+                f"and <C3> (positions): {source}"
             )
 
         count = min(len(field_names), len(positions))
@@ -122,7 +160,7 @@ class StandardSelectionLoader:
                 description=self._get(columns, "C11", index),
                 is_local_ref=self._is_local_ref_position(position),
                 is_custom_field=(system_type or "").upper() in {"USR", "LOCAL", "CUSTOM"},
-                source=str(file_path)
+                source=source
             )
 
             registry.register_field(meta)
@@ -137,7 +175,7 @@ class StandardSelectionLoader:
                         position=position,
                         target_application=relationship_target,
                         relationship_type="STANDARD_SELECTION_C8",
-                        source=str(file_path)
+                        source=source
                     )
                 )
 

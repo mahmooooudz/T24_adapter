@@ -23,7 +23,11 @@ from t24_adapter import (
     T24GenericPipeline,
     T24PipelineConfig,
     WidePivotWriter,
+    load_env,
 )
+
+# Load database credentials from .env into the environment (no-op if absent).
+load_env()
 
 # ============================================================
 # Logging Setup
@@ -69,6 +73,25 @@ def main():
 
         # Include unmapped fields in output (recommended: True)
         output_unknown_fields=True,
+
+        # ----------------------------------------------------------------
+        # Data source: read records from the PostgreSQL database.
+        # Metadata (STANDARD.SELECTION etc.) is still loaded from files.
+        # Credentials come from .env (DB_URL or DB_HOST/PORT/NAME/USER/PASSWORD).
+        # To go back to file-based input, set source="files" (or remove these).
+        # ----------------------------------------------------------------
+        source="database",
+        db_schema="t24_adaptor",
+        db_tables={"ACCOUNT": "FBANK_Account"},
+        db_record_column="xmlRecord",
+
+        # STANDARD.SELECTION metadata also from the database.
+        # Requires the table created by migrations/001_standard_selection.sql.
+        # Until that migration is run, the loader falls back to the XML files
+        # (with a warning), so this is safe to enable now.
+        db_metadata_table="STANDARD_SELECTION",
+        db_metadata_key_column="appName",
+        db_metadata_xml_column="xmlRecord",
     )
 
     # ============================================================

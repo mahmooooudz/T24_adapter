@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ROW>
-    <C1>ACCOUNT.NO</C1>
     <C1>CUSTOMER</C1>
+    <C1>ACCOUNT.NO</C1>
     <C1>CATEGORY</C1>
     <C1>ACCOUNT.TITLE.1</C1>
     <C1>CURRENCY</C1>

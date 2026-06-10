@@ -11,7 +11,7 @@ All business meaning comes from metadata files.
 from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 
 @dataclass
@@ -87,6 +87,37 @@ class T24PipelineConfig:
 
     local_ref_base_positions: Tuple[str, ...] = ("64",)
     output_unknown_fields: bool = True
+
+    # ------------------------------------------------------------------ #
+    # Data source selection
+    # ------------------------------------------------------------------ #
+    # "files"    -> read record data from data/*.xml (default, unchanged)
+    # "database" -> read record data from a PostgreSQL table whose record
+    #               column holds the T24 XML for each record.
+    # Metadata (STANDARD.SELECTION, LOCAL.REF, ...) is ALWAYS loaded from
+    # files regardless of this setting.
+    source: str = "files"
+
+    # PostgreSQL settings (used only when source == "database").
+    # Connection credentials come from environment variables (.env):
+    # DB_URL, or DB_HOST / DB_PORT / DB_NAME / DB_USER / DB_PASSWORD.
+    db_schema: str = "t24_adaptor"
+
+    # Maps application name -> source table name, e.g. {"ACCOUNT": "FBANK_Account"}.
+    # The application name is used to locate metadata files on disk.
+    db_tables: Optional[Dict[str, str]] = None
+
+    # Name of the column holding each record's XML.
+    db_record_column: str = "xmlRecord"
+
+    # Optional: load STANDARD.SELECTION metadata from a database table
+    # (same schema) instead of files. One row per application:
+    #   <db_metadata_key_column> (e.g. appName) | <db_metadata_xml_column> (xmlRecord)
+    # When None, metadata is always read from files. When set, the DB is tried
+    # first and falls back to files (with a warning) if the table/row is absent.
+    db_metadata_table: Optional[str] = None
+    db_metadata_key_column: str = "appName"
+    db_metadata_xml_column: str = "xmlRecord"
 
     def resolve(self, relative_dir: str) -> Path:
         """Return absolute path for a subdirectory under package_root."""

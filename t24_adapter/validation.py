@@ -60,10 +60,15 @@ class T24PackageValidator:
         if not result.is_valid:
             return result
 
-        self._check_data_directory(result)
+        # In database mode the record data comes from PostgreSQL, not from
+        # data/*.xml, so the data-file checks are skipped. Metadata is still
+        # loaded from files and therefore still validated.
+        if self.config.source != "database":
+            self._check_data_directory(result)
         self._check_metadata_directory(result)
         self._check_xsd_directory(result)
-        self._check_data_xml_files(result)
+        if self.config.source != "database":
+            self._check_data_xml_files(result)
         self._check_metadata_xml_files(result)
         self._check_optional_directories(result)
 

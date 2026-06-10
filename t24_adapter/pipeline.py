@@ -50,6 +50,7 @@ from .metadata_registry import T24MetadataRegistry
 from .models import NormalizedField
 from .normalizer import T24Normalizer
 from .reader import T24StreamingDataReader
+from .db_reader import T24DatabaseDataReader, T24DatabaseMetadataReader
 from .validation import T24PackageValidator
 
 logger = logging.getLogger("t24-adapter.pipeline")
@@ -77,6 +78,17 @@ class T24MetadataOrchestrator:
         self.config = config
         self.discovery = discovery
         self.registry = T24MetadataRegistry()
+        # Optional database-backed STANDARD.SELECTION source.
+        self.metadata_reader = (
+            T24DatabaseMetadataReader(
+                schema=config.db_schema,
+                table=config.db_metadata_table,
+                key_column=config.db_metadata_key_column,
+                xml_column=config.db_metadata_xml_column,
+            )
+            if config.source == "database" and config.db_metadata_table
+            else None
+        )
 
     def load_for_application(self, app_name: str) -> T24MetadataRegistry:
         """
@@ -90,20 +102,12 @@ class T24MetadataOrchestrator:
         -------
         T24MetadataRegistry populated with all available metadata
         """
-        standard_file = self.discovery.get_metadata_file(app_name)
         local_ref_file = self.discovery.get_local_ref_file(app_name)
         customization_file = self.discovery.get_customization_file(app_name)
         relationship_file = self.discovery.get_relationship_file(app_name)
 
-        # --- STANDARD.SELECTION (required if configured) ---
-        if self.config.require_standard_selection and not standard_file:
-            raise FileNotFoundError(
-                f"Missing STANDARD.SELECTION metadata for application: {app_name}. "
-                f"Expected in: {self.config.metadata_path()}"
-            )
-
-        if standard_file:
-            StandardSelectionLoader().load(app_name, standard_file, self.registry)
+        # --- STANDARD.SELECTION (database first if configured, else file) ---
+        self._load_standard_selection(app_name)
 
         # --- LOCAL.REF (optional but logged if absent) ---
         if local_ref_file:
@@ -132,6 +136,47 @@ class T24MetadataOrchestrator:
 
         logger.info(self.registry.summary(app_name))
         return self.registry
+
+    def _load_standard_selection(self, app_name: str) -> None:
+        """
+        Load STANDARD.SELECTION for one application.
+
+        Order of precedence:
+        1. Database metadata table, if configured (source == "database" and
+           db_metadata_table set).
+        2. File metadata (always the fallback, and the only path in files mode).
+
+        If the database is configured but has no row for this app (or the
+        table does not exist yet), a warning is logged and the file is used.
+        """
+        # 1) Try the database metadata table first.
+        if self.metadata_reader is not None:
+            xml_text = self.metadata_reader.fetch_xml(app_name)
+            if xml_text:
+                source = (
+                    f"{self.config.db_schema}.{self.config.db_metadata_table}"
+                    f"#{app_name}"
+                )
+                StandardSelectionLoader().load_from_string(
+                    app_name, xml_text, self.registry, source=source
+                )
+                return
+            logger.warning(
+                f"[{app_name}] No STANDARD.SELECTION row in "
+                f"{self.config.db_schema}.{self.config.db_metadata_table}; "
+                f"falling back to file metadata. Run the standard-selection "
+                f"migration to complete the move to the database."
+            )
+
+        # 2) File metadata (fallback, or the only path in files mode).
+        standard_file = self.discovery.get_metadata_file(app_name)
+        if self.config.require_standard_selection and not standard_file:
+            raise FileNotFoundError(
+                f"Missing STANDARD.SELECTION metadata for application: {app_name}. "
+                f"No database row and no file in: {self.config.metadata_path()}"
+            )
+        if standard_file:
+            StandardSelectionLoader().load(app_name, standard_file, self.registry)
 
     def _validate_local_ref_coverage(self, app_name: str) -> None:
         """
@@ -179,6 +224,14 @@ class T24GenericPipeline:
         self.validator = T24PackageValidator(config)
         self.discovery = T24PackageDiscovery(config)
         self.reader = T24StreamingDataReader()
+        self.db_reader = (
+            T24DatabaseDataReader(
+                schema=config.db_schema,
+                record_column=config.db_record_column,
+            )
+            if config.source == "database"
+            else None
+        )
 
     def run(self) -> Iterator[NormalizedField]:
         """
@@ -216,13 +269,20 @@ class T24GenericPipeline:
 
         # === STAGE 2: Application Discovery ===
         logger.info("=== STAGE 2: Application Discovery ===")
-        applications = self.discovery.discover_applications()
-
-        if not applications:
-            raise RuntimeError(
-                "No T24 XML data files found in the data directory. "
-                "Ensure data/*.xml files exist."
-            )
+        if self.config.source == "database":
+            applications = sorted((self.config.db_tables or {}).keys())
+            if not applications:
+                raise RuntimeError(
+                    "Database source selected but config.db_tables is empty. "
+                    "Provide an app -> table mapping, e.g. {'ACCOUNT': 'FBANK_Account'}."
+                )
+        else:
+            applications = self.discovery.discover_applications()
+            if not applications:
+                raise RuntimeError(
+                    "No T24 XML data files found in the data directory. "
+                    "Ensure data/*.xml files exist."
+                )
 
         logger.info(f"Applications to process: {applications}")
 
@@ -235,10 +295,18 @@ class T24GenericPipeline:
         for app_name in applications:
             logger.info(f"=== Processing Application: {app_name} ===")
 
-            data_file = self.discovery.get_data_file(app_name)
-            if not data_file:
-                logger.warning(f"Data file not found for {app_name}, skipping.")
-                continue
+            # Resolve the record source for this application.
+            if self.config.source == "database":
+                table = self.config.db_tables[app_name]
+                record_stream = self.db_reader.stream_records(table)
+                source_label = f"{self.config.db_schema}.{table}"
+            else:
+                data_file = self.discovery.get_data_file(app_name)
+                if not data_file:
+                    logger.warning(f"Data file not found for {app_name}, skipping.")
+                    continue
+                record_stream = self.reader.stream_records(data_file)
+                source_label = str(data_file)
 
             # === STAGE 3: Load Metadata ===
             logger.info(f"--- Stage 3: Loading Metadata for {app_name} ---")
@@ -251,12 +319,12 @@ class T24GenericPipeline:
             record_count = 0
             field_count = 0
 
-            for record in self.reader.stream_records(data_file):
+            for record in record_stream:
                 record_count += 1
                 normalized_fields = normalizer.normalize_record(
                     app_name=app_name,
                     row=record,
-                    source_file=str(data_file)
+                    source_file=source_label
                 )
 
                 for normalized_field in normalized_fields:

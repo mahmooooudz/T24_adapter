@@ -18,3 +18,4 @@ pipeline.log
 .idea/
 .vscode/
 .claude/
+.env
