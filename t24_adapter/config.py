@@ -120,6 +120,11 @@ class T24PipelineConfig:
     db_metadata_key_column: str = "recordId"
     db_metadata_xml_column: str = "xmlRecord"
 
+    # Output (wide result) tables are written back into the same schema with
+    # this suffix, e.g. ACCOUNT -> "ACCOUNT_wide". Discovery excludes any
+    # table ending with this suffix so results are never re-ingested as input.
+    db_output_suffix: str = "_wide"
+
     # ------------------------------------------------------------------ #
     # Record identity
     # ------------------------------------------------------------------ #

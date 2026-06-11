@@ -104,16 +104,19 @@ class T24DatabaseDataReader:
         """Open a connection using environment variables (see _connect_from_env)."""
         return _connect_from_env()
 
-    def discover_tables(self, exclude=()) -> list:
+    def discover_tables(self, exclude=(), exclude_suffixes=()) -> list:
         """
         Return the names of all base tables in the configured schema,
-        excluding any in `exclude` (e.g. the metadata table).
+        excluding any in `exclude` (e.g. the metadata table) and any whose
+        name ends with one of `exclude_suffixes` (e.g. the output "_wide"
+        result tables, so they are never re-ingested as input).
 
         This is how data applications are discovered dynamically: each table
-        in the schema (other than the metadata table) is one application,
-        keyed by its own name. No application names are hardcoded.
+        in the schema (other than the metadata/output tables) is one
+        application, keyed by its own name. No application names are hardcoded.
         """
         exclude_set = set(exclude or ())
+        suffixes = tuple(exclude_suffixes or ())
         conn = _connect_from_env()
         try:
             with conn.cursor() as cursor:
@@ -126,7 +129,10 @@ class T24DatabaseDataReader:
                 names = [r[0] for r in cursor.fetchall()]
         finally:
             conn.close()
-        return [n for n in names if n not in exclude_set]
+        return [
+            n for n in names
+            if n not in exclude_set and not (suffixes and n.endswith(suffixes))
+        ]
 
     # ------------------------------------------------------------------ #
     # Streaming

@@ -274,7 +274,8 @@ class T24GenericPipeline:
             # Dynamic: every base table in the schema (except the metadata
             # table) is an application, keyed by its own name. No hardcoding.
             applications = self.db_reader.discover_tables(
-                exclude={self.config.db_metadata_table}
+                exclude={self.config.db_metadata_table},
+                exclude_suffixes=(self.config.db_output_suffix,),
             )
             if not applications:
                 raise RuntimeError(

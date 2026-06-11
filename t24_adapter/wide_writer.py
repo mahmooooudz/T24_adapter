@@ -315,6 +315,13 @@ class WidePivotWriter:
         if cur_row is not None:
             yield cur_row
 
+    def iter_wide_rows(self, rows, schema, app_name):
+        """
+        Public access to the wide-row generator: yields one wide row dict per
+        record of `app_name`. Used by output sinks (CSV, JSONL, database).
+        """
+        return self._iter_wide_rows(rows, schema, app_name)
+
     # ------------------------------------------------------------------ #
     # Public writers
     # ------------------------------------------------------------------ #

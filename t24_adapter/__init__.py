@@ -21,6 +21,7 @@ from .models import FieldMetadata, NormalizedField, RelationshipMetadata, FileVa
 from .pipeline import T24GenericPipeline, T24MetadataOrchestrator
 from .sinks import NormalizedOutputWriter
 from .wide_writer import WidePivotWriter
+from .db_writer import WideDatabaseWriter
 from .metadata_registry import T24MetadataRegistry
 from .metadata_loaders import (
     StandardSelectionLoader,
@@ -50,6 +51,7 @@ __all__ = [
     "T24PackageDiscovery",
     "NormalizedOutputWriter",
     "WidePivotWriter",
+    "WideDatabaseWriter",
     "StandardSelectionLoader",
     "LocalReferenceLoader",
     "CustomizationLoader",

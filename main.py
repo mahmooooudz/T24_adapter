@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from t24_adapter import (
     T24GenericPipeline,
     T24PipelineConfig,
-    WidePivotWriter,
+    WideDatabaseWriter,
     load_env,
 )
 
@@ -103,43 +103,21 @@ def main():
     pipeline = T24GenericPipeline(config)
 
     # ============================================================
-    # 3. Output directory
+    # 3. Write WIDE output back into the database (one table per app).
+    #    Result tables are <APP>_wide in the same schema; the "_wide"
+    #    suffix is excluded from input discovery so they are never
+    #    re-ingested. DDL is managed automatically (create-if-missing,
+    #    add new columns), then each table is truncated and reloaded.
     # ============================================================
-    output_dir = Path("output")
-    output_dir.mkdir(exist_ok=True)
+    writer = WideDatabaseWriter(
+        schema=config.db_schema,
+        suffix=config.db_output_suffix,
+    )
 
-    # ============================================================
-    # 4. Write WIDE output (one file per application)
-    #    Two-pass streaming: constant memory regardless of file size.
-    # ============================================================
-    writer = WidePivotWriter()
-
-    logger.info("Writing wide CSV output...")
-    csv_outputs = writer.write_csv(pipeline, output_dir)
-    for app_name, path in csv_outputs.items():
-        logger.info(f"  {app_name}: {path}")
-
-    logger.info("Writing wide JSONL output...")
-    jsonl_outputs = writer.write_jsonl(pipeline, output_dir)
-    for app_name, path in jsonl_outputs.items():
-        logger.info(f"  {app_name}: {path}")
-
-    # ============================================================
-    # 5. Print preview table (requires pandas)
-    # ============================================================
-    logger.info("Printing preview table...")
-    try:
-        import pandas as pd  # noqa: F401
-        for app_name in csv_outputs:
-            df = writer.to_dataframe(pipeline, app_name)
-            print(f"\n=== Wide Output: {app_name} (first 30 rows) ===\n")
-            # disable_numparse: T24 values are strings (phones, IDs); keep them
-            # verbatim instead of letting the table renderer coerce to floats.
-            print(df.head(30).to_markdown(index=False, disable_numparse=True))
-            print(f"\nTotal records: {len(df)}")
-            print(f"Total columns: {len(df.columns)}")
-    except ImportError:
-        logger.warning("pandas not installed. Skipping preview table.")
+    logger.info("Writing wide output to the database...")
+    written = writer.write(pipeline)
+    for app_name, (table, rows, cols) in written.items():
+        logger.info(f"  {app_name} -> {config.db_schema}.{table}  ({rows} rows x {cols} cols)")
 
     logger.info("=== Pipeline run complete ===")
 
