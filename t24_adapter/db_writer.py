@@ -14,27 +14,35 @@ schema, with one TEXT column per wide-table column (recordId, app_name,
 CUSTOMER, ACCOUNT.NO, ACCOUNT.OFFICER_1, ...). The "_wide" suffix is excluded
 from input discovery, so result tables are never re-ingested as source data.
 
-DDL / refresh policy (create-if-missing + truncate + insert)
-------------------------------------------------------------
+Write policy (UPSERT — no truncation)
+-------------------------------------
 Per application, per run:
-1. If the result table does not exist -> CREATE TABLE with the current columns.
-2. If it exists -> ADD COLUMN for any new columns (e.g. a newly appearing
-   INTEREST.RATE_3), so the table keeps up with schema growth.
-3. TRUNCATE the table, then batch-INSERT all current rows.
+1. Ensure the table exists with the current columns; ADD COLUMN for any new
+   ones (dynamic schema growth). Ensure a UNIQUE constraint on the key column
+   (required for ON CONFLICT).
+2. UPSERT every row: INSERT ... ON CONFLICT (key) DO UPDATE SET <cols>.
+   New keys are inserted, existing keys are updated in place. Re-runs are
+   idempotent; changed values are reflected. Nothing is truncated.
 
-All columns are TEXT (values are kept verbatim, as elsewhere in the adapter).
-Blank cells are written as NULL.
+Write modes (same upsert, different flush size):
+- "streaming" (default): upsert each row as produced — low, constant memory.
+- "batching": accumulate db_batch_size rows, then bulk-upsert.
 
-Memory
-------
-Rows are streamed from the pivot and inserted in batches via
-psycopg2.extras.execute_values, so memory stays bounded.
+Full sync (optional, safety-gated)
+----------------------------------
+When config.db_full_sync is on, after upserting, rows whose key was NOT seen
+this run are DELETEd, so source deletions are mirrored. The sweep only runs
+when the run is safe to treat as a complete snapshot (see _should_sweep):
+the upserts + sweep happen in one per-app transaction, so the table is never
+left half-synced.
+
+All columns are TEXT (values kept verbatim). Blank cells are written as NULL.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict
+from typing import Dict, List
 
 from .db_reader import _connect_from_env
 from .wide_writer import WidePivotWriter
@@ -44,28 +52,48 @@ logger = logging.getLogger("t24-adapter.db-writer")
 
 class WideDatabaseWriter:
     """
-    Writes per-application wide tables into a PostgreSQL schema.
+    Writes per-application wide tables into a PostgreSQL schema via UPSERT,
+    with an optional, safety-gated full-sync delete-sweep.
 
     Usage
     -----
-    writer = WideDatabaseWriter(schema="t24_adaptor", suffix="_wide")
+    writer = WideDatabaseWriter(
+        schema="t24_adaptor", suffix="_wide",
+        write_mode="streaming", batch_size=500,
+        key_column="recordId", full_sync=True,
+    )
     written = writer.write(pipeline)
-    # written -> {"ACCOUNT": ("ACCOUNT_wide", row_count, col_count), ...}
+    # written -> {"ACCOUNT": (table, upserted, deleted, col_count), ...}
     """
 
-    def __init__(self, schema: str, suffix: str = "_wide", batch_size: int = 500):
+    def __init__(
+        self,
+        schema: str,
+        suffix: str = "_wide",
+        write_mode: str = "streaming",
+        batch_size: int = 500,
+        key_column: str = "recordId",
+        full_sync: bool = False,
+        filters_active: bool = False,
+    ):
         self.schema = schema
         self.suffix = suffix
-        self.batch_size = batch_size
+        self.write_mode = write_mode
+        self.batch_size = batch_size if write_mode == "batching" else 1
+        self.key_column = key_column
+        self.full_sync = full_sync
+        # When the (future) Filters feature narrows a run, this must be True so
+        # the delete-sweep is disabled (a partial run must never delete rows).
+        self.filters_active = filters_active
         self._pivot = WidePivotWriter()
 
     def write(self, pipeline) -> Dict[str, tuple]:
         """
-        Pivot every application and write each to its own result table.
+        Pivot every application and upsert each into its own result table.
 
         Returns
         -------
-        Dict[app_name, (table_name, rows_written, column_count)]
+        Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
         schemas = self._pivot.discover_schema(pipeline.run())
         if not schemas:
@@ -78,17 +106,19 @@ class WideDatabaseWriter:
             for app_name, app_schema in schemas.items():
                 table = f"{app_name}{self.suffix}"
                 columns = app_schema.columns
+                # One transaction per app: DDL + upserts + sweep commit together.
                 with conn.cursor() as cursor:
                     self._ensure_table(cursor, table, columns)
-                    self._truncate(cursor, table)
-                    rows_written = self._insert_rows(
+                    upserted, seen = self._upsert_rows(
                         cursor, pipeline, app_schema, app_name, table, columns
                     )
+                    deleted = self._sweep(cursor, table, seen)
                 conn.commit()
-                results[app_name] = (table, rows_written, len(columns))
+                results[app_name] = (table, upserted, deleted, len(columns))
                 logger.info(
-                    f"Wrote {self.schema}.{table}: "
-                    f"{rows_written} rows x {len(columns)} columns"
+                    f"Wrote {self.schema}.{table}: {upserted} upserted, "
+                    f"{deleted} deleted, {len(columns)} columns "
+                    f"(mode={self.write_mode})"
                 )
         except Exception:
             conn.rollback()
@@ -101,8 +131,8 @@ class WideDatabaseWriter:
     # DDL
     # ------------------------------------------------------------------ #
 
-    def _ensure_table(self, cursor, table: str, columns) -> None:
-        """Create the table if missing; otherwise add any new columns."""
+    def _ensure_table(self, cursor, table: str, columns: List[str]) -> None:
+        """Create the table if missing; add new columns; ensure the key is UNIQUE."""
         from psycopg2 import sql
 
         cursor.execute(
@@ -110,23 +140,22 @@ class WideDatabaseWriter:
             "WHERE table_schema = %s AND table_name = %s",
             (self.schema, table),
         )
-        exists = cursor.fetchone() is not None
-
-        if not exists:
+        if cursor.fetchone() is None:
             col_defs = sql.SQL(", ").join(
                 sql.SQL("{} text").format(sql.Identifier(c)) for c in columns
             )
             cursor.execute(
-                sql.SQL("CREATE TABLE {}.{} ({})").format(
+                sql.SQL("CREATE TABLE {}.{} ({}, UNIQUE ({}))").format(
                     sql.Identifier(self.schema),
                     sql.Identifier(table),
                     col_defs,
+                    sql.Identifier(self.key_column),
                 )
             )
             logger.info(f"Created table {self.schema}.{table} ({len(columns)} columns)")
             return
 
-        # Table exists: add any columns present now but missing in the table.
+        # Exists: add any columns present now but missing in the table.
         cursor.execute(
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s",
@@ -137,50 +166,134 @@ class WideDatabaseWriter:
             if c not in existing:
                 cursor.execute(
                     sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
-                        sql.Identifier(self.schema),
-                        sql.Identifier(table),
+                        sql.Identifier(self.schema), sql.Identifier(table),
                         sql.Identifier(c),
                     )
                 )
                 logger.info(f"Added column {c!r} to {self.schema}.{table}")
 
-    def _truncate(self, cursor, table: str) -> None:
+        self._ensure_unique(cursor, table)
+
+    def _ensure_unique(self, cursor, table: str) -> None:
+        """Ensure a UNIQUE constraint exists on the key column (needed for upsert)."""
         from psycopg2 import sql
 
         cursor.execute(
-            sql.SQL("TRUNCATE TABLE {}.{}").format(
-                sql.Identifier(self.schema), sql.Identifier(table)
-            )
+            """SELECT 1
+                 FROM pg_index i
+                 JOIN pg_class c   ON c.oid = i.indrelid
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+                WHERE n.nspname = %s AND c.relname = %s
+                  AND i.indisunique AND a.attname = %s
+                  AND array_length(i.indkey, 1) = 1""",
+            (self.schema, table, self.key_column),
         )
+        if cursor.fetchone():
+            return
+        try:
+            cursor.execute(
+                sql.SQL("ALTER TABLE {}.{} ADD CONSTRAINT {} UNIQUE ({})").format(
+                    sql.Identifier(self.schema), sql.Identifier(table),
+                    sql.Identifier(f"{table}_{self.key_column}_key"),
+                    sql.Identifier(self.key_column),
+                )
+            )
+            logger.info(f"Added UNIQUE({self.key_column}) on {self.schema}.{table}")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot add UNIQUE({self.key_column}) on {self.schema}.{table} — "
+                f"existing data likely has duplicate keys. Upsert requires a "
+                f"unique key. Underlying error: {exc}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
-    # DML
+    # DML — upsert
     # ------------------------------------------------------------------ #
 
-    def _insert_rows(self, cursor, pipeline, app_schema, app_name, table, columns) -> int:
-        """Stream wide rows for one app and batch-insert them."""
+    def _upsert_rows(self, cursor, pipeline, app_schema, app_name, table, columns):
+        """
+        Upsert all wide rows for one app. Returns (count, seen_keys_set).
+        Streaming uses flush size 1; batching uses db_batch_size.
+        """
         from psycopg2 import sql
         from psycopg2.extras import execute_values
 
-        insert_sql = sql.SQL("INSERT INTO {}.{} ({}) VALUES %s").format(
-            sql.Identifier(self.schema),
-            sql.Identifier(table),
+        non_key = [c for c in columns if c != self.key_column]
+        upsert_sql = sql.SQL(
+            "INSERT INTO {}.{} ({}) VALUES %s "
+            "ON CONFLICT ({}) DO UPDATE SET {}"
+        ).format(
+            sql.Identifier(self.schema), sql.Identifier(table),
             sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+            sql.Identifier(self.key_column),
+            sql.SQL(", ").join(
+                sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c)) for c in non_key
+            ),
         ).as_string(cursor)
 
         def to_tuple(row):
-            # Blank cells -> NULL.
             return tuple(None if row[c] == "" else row[c] for c in columns)
 
+        seen = set()
         batch = []
         total = 0
         for row in self._pivot.iter_wide_rows(pipeline.run(), app_schema, app_name):
+            seen.add(row[self.key_column])
             batch.append(to_tuple(row))
             if len(batch) >= self.batch_size:
-                execute_values(cursor, insert_sql, batch)
+                execute_values(cursor, upsert_sql, batch)
                 total += len(batch)
                 batch = []
         if batch:
-            execute_values(cursor, insert_sql, batch)
+            execute_values(cursor, upsert_sql, batch)
             total += len(batch)
-        return total
+        return total, seen
+
+    # ------------------------------------------------------------------ #
+    # Full-sync delete-sweep (safety-gated)
+    # ------------------------------------------------------------------ #
+
+    def _should_sweep(self, table: str, seen: set) -> bool:
+        """
+        Decide whether the delete-sweep may run. Safe ONLY when:
+        - full sync is enabled,
+        - no filters narrowed the run (a partial run must never delete),
+        - at least one key was seen (empty result would wipe the whole table;
+          we refuse and warn rather than risk a glitch-driven full wipe).
+        Clean completion is structurally guaranteed: the sweep is the last step
+        in the per-app transaction, so any earlier error rolls back instead.
+        """
+        if not self.full_sync:
+            return False
+        if self.filters_active:
+            logger.warning(
+                f"[{table}] full sync skipped: filters are active "
+                f"(a partial run must not delete rows)."
+            )
+            return False
+        if not seen:
+            logger.warning(
+                f"[{table}] full sync skipped: zero records seen this run "
+                f"(refusing to wipe the whole table as a safety measure)."
+            )
+            return False
+        return True
+
+    def _sweep(self, cursor, table: str, seen: set) -> int:
+        """Delete result rows whose key was not seen this run. Returns count."""
+        if not self._should_sweep(table, seen):
+            return 0
+        from psycopg2 import sql
+
+        cursor.execute(
+            sql.SQL("DELETE FROM {}.{} WHERE NOT ({} = ANY(%s))").format(
+                sql.Identifier(self.schema), sql.Identifier(table),
+                sql.Identifier(self.key_column),
+            ),
+            (list(seen),),
+        )
+        deleted = cursor.rowcount
+        if deleted:
+            logger.info(f"Full sync: deleted {deleted} stale row(s) from {self.schema}.{table}")
+        return deleted

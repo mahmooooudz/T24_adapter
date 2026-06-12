@@ -143,6 +143,25 @@ class T24PipelineConfig:
     record_id_from_db_column: bool = True
     record_id_db_column: str = "recordId"
 
+    # ------------------------------------------------------------------ #
+    # Output write behaviour (database sink)
+    # ------------------------------------------------------------------ #
+    # How rows are written to the result tables:
+    #   "streaming" -> upsert each row as it is produced (low memory, default)
+    #   "batching"  -> upsert in bulk chunks of db_batch_size (higher throughput)
+    # Both modes UPSERT (INSERT ... ON CONFLICT DO UPDATE) on db_key_column,
+    # so re-runs update changed rows in place. No truncation.
+    db_write_mode: str = "streaming"
+    db_batch_size: int = 500
+
+    # Conflict / sync key column for the result tables (the wide-row key).
+    db_key_column: str = "recordId"
+
+    # Full sync: after upserting, delete result rows whose key was NOT seen in
+    # this run, so deletions in the source are mirrored. SAFETY-GATED — only
+    # runs on a complete, unfiltered, cleanly-finished run (see db_writer).
+    db_full_sync: bool = False
+
     def resolve(self, relative_dir: str) -> Path:
         """Return absolute path for a subdirectory under package_root."""
         return self.package_root / relative_dir
