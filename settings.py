@@ -59,4 +59,5 @@ def build_config() -> T24PipelineConfig:
         db_batch_size=500,
         db_key_column="recordId",
         db_full_sync=True,           # mirror source deletions (safety-gated)
+        db_filters_active=False,     # set True for any narrowed/partial run
     )

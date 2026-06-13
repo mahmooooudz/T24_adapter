@@ -49,12 +49,16 @@ The adapter automatically discovers applications, loads metadata, streams large 
 * User-defined metadata extensions
 * Relationship enrichment and lineage tracking
 
-### Multiple Output Formats
+### Output
 
-* CSV
-* JSONL
+The default output is the **database**: each application is flattened into a
+wide table (`<APP>_wide`) in the same schema and written via **UPSERT** (insert
+new, update changed) with an optional safety-gated **full sync** that mirrors
+source deletions. The same wide rows can also be emitted as:
+
+* Wide CSV
+* Wide JSONL
 * Pandas DataFrames
-* Custom database targets
 * Downstream integration pipelines
 
 ---
@@ -122,8 +126,8 @@ Streaming XML Reader
 Normalization Engine
       │
       ▼
-Normalized Output
-(CSV / JSONL / DataFrame / Database)
+Wide Pivot  →  Database (UPSERT + full sync)
+(also: wide CSV / JSONL / DataFrame)
 ```
 
 ---

@@ -58,6 +58,7 @@ def main():
         batch_size=config.db_batch_size,
         key_column=config.db_key_column,
         full_sync=config.db_full_sync,
+        filters_active=config.db_filters_active,
     )
 
     logger.info(f"Writing wide output to the database (mode={config.db_write_mode}, "

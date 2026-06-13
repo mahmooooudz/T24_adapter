@@ -322,6 +322,51 @@ class WidePivotWriter:
         """
         return self._iter_wide_rows(rows, schema, app_name)
 
+    def iter_all_wide_rows(self, rows, schemas: Dict[str, "_AppSchema"]):
+        """
+        Single pass over the FULL long stream, yielding (app_name, wide_row)
+        for every record across all applications — so the source is read once
+        for all apps instead of once per app.
+
+        The pipeline emits records app-by-app (all of one application's records
+        before the next), so rows for an app arrive contiguously; a new wide
+        row starts whenever the application or record_id changes.
+        """
+        cur_app: object = _NO_RECORD
+        cur_record_id: object = _NO_RECORD
+        cur_schema: Optional[_AppSchema] = None
+        cur_row: Optional[Dict[str, str]] = None
+        cur_slot: Dict[str, int] = {}
+
+        for field in rows:
+            schema = schemas.get(field.app_name)
+            if schema is None:
+                # No schema discovered for this app (shouldn't happen — both
+                # passes see the same stream); skip defensively.
+                continue
+
+            if field.app_name != cur_app or field.record_id != cur_record_id:
+                if cur_row is not None:
+                    yield (cur_app, cur_row)
+                cur_app = field.app_name
+                cur_record_id = field.record_id
+                cur_schema = schema
+                cur_row = {col: "" for col in schema.columns}
+                cur_row["recordId"] = field.record_id if field.record_id is not None else ""
+                cur_row["app_name"] = field.app_name
+                cur_slot = {}
+
+            headers = cur_schema.headers_for(field.resolved_position)
+            if not headers:
+                continue
+            slot = cur_slot.get(field.resolved_position, 0)
+            if slot < len(headers):
+                cur_row[headers[slot]] = field.value if field.value is not None else ""
+            cur_slot[field.resolved_position] = slot + 1
+
+        if cur_row is not None:
+            yield (cur_app, cur_row)
+
     # ------------------------------------------------------------------ #
     # Public writers
     # ------------------------------------------------------------------ #

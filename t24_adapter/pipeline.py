@@ -18,25 +18,20 @@ at a time, so memory usage is constant regardless of file size.
 
 Usage
 -----
-from pathlib import Path
-from t24_adapter.config import T24PipelineConfig
-from t24_adapter.pipeline import T24GenericPipeline
-from t24_adapter.sinks import NormalizedOutputWriter
+from t24_adapter import T24GenericPipeline, WideDatabaseWriter
+from settings import build_config
 
-config = T24PipelineConfig(package_root=Path("t24_input_package"))
+config = build_config()
 pipeline = T24GenericPipeline(config)
 
-NormalizedOutputWriter.write_csv(
-    rows=pipeline.run(),
-    output_file=Path("output/result.csv")
-)
+# pipeline.run() is a generator of NormalizedField; the sink consumes it.
+WideDatabaseWriter(schema=config.db_schema).write(pipeline)
 """
 
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Iterator, Optional
+from typing import Iterator
 
 from .config import T24PipelineConfig
 from .discovery import T24PackageDiscovery

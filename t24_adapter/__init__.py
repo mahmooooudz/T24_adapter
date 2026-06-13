@@ -8,18 +8,23 @@ T24 core banking XML data into a flat, relational format.
 
 Quick Start
 -----------
-from pathlib import Path
-from t24_adapter import T24GenericPipeline, T24PipelineConfig, NormalizedOutputWriter
+from t24_adapter import T24GenericPipeline, WideDatabaseWriter, load_env
+from settings import build_config
 
-config = T24PipelineConfig(package_root=Path("t24_input_package"))
+load_env()                                   # DB credentials from .env
+config = build_config()                      # source=database, output=database
 pipeline = T24GenericPipeline(config)
-NormalizedOutputWriter.write_csv(rows=pipeline.run(), output_file=Path("output/result.csv"))
+
+# Flatten and UPSERT the wide result back into PostgreSQL (one table per app).
+WideDatabaseWriter(
+    schema=config.db_schema, suffix=config.db_output_suffix,
+    write_mode=config.db_write_mode, full_sync=config.db_full_sync,
+).write(pipeline)
 """
 
 from .config import T24PipelineConfig
 from .models import FieldMetadata, NormalizedField, RelationshipMetadata, FileValidationResult
 from .pipeline import T24GenericPipeline, T24MetadataOrchestrator
-from .sinks import NormalizedOutputWriter
 from .wide_writer import WidePivotWriter
 from .db_writer import WideDatabaseWriter
 from .metadata_registry import T24MetadataRegistry
@@ -49,7 +54,6 @@ __all__ = [
     "load_env",
     "T24PackageValidator",
     "T24PackageDiscovery",
-    "NormalizedOutputWriter",
     "WidePivotWriter",
     "WideDatabaseWriter",
     "StandardSelectionLoader",

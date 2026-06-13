@@ -1,0 +1,7 @@
+# Runtime dependencies for the T24 Generic Adapter.
+# Core extraction/normalization uses only the Python standard library.
+# The pieces below are needed for the database source/sink and the preview.
+
+psycopg2-binary>=2.9    # PostgreSQL driver (database source + sink)
+pandas>=2.0             # optional: DataFrame preview / analysis
+tabulate>=0.9           # optional: pretty console preview tables

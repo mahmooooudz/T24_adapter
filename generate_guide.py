@@ -429,7 +429,7 @@ def build_architecture(styles):
         ["3 — Load Metadata", "metadata_loaders.py +\nmetadata_registry.py", "Load STANDARD.SELECTION, LOCAL.REF, CUSTOMIZATION, RELATIONSHIPS into memory"],
         ["4 — Stream", "reader.py", "Stream <row> records one-by-one using ET.iterparse() — no full file load"],
         ["5 — Normalize", "normalizer.py", "Resolve field names, handle m-values, s-values, local refs; emit NormalizedField records"],
-        ["Output", "sinks.py", "Write CSV, JSONL, DataFrame, or custom targets"],
+        ["Output", "wide_writer.py / db_writer.py", "Pivot long records into wide tables and UPSERT them into PostgreSQL (also wide CSV / JSONL / DataFrame)"],
     ]
 
     col_w = [(PAGE_W - 2*MARGIN) / 3] * 3
@@ -493,7 +493,8 @@ def build_structure(styles):
         "    metadata_loaders.py    # Four loader classes",
         "    reader.py              # T24StreamingDataReader",
         "    normalizer.py          # T24Normalizer",
-        "    sinks.py               # NormalizedOutputWriter",
+        "    wide_writer.py         # WidePivotWriter (long -> wide pivot)",
+        "    db_writer.py           # WideDatabaseWriter (UPSERT + full sync)",
         "    pipeline.py            # T24GenericPipeline (master orchestrator)",
         "",
         "main.py                    # Example execution entry point",
@@ -734,14 +735,22 @@ def build_modules(styles):
         styles
     )
 
-    # 3.10 sinks.py
-    story.append(Paragraph("3.10  sinks.py — Output Writers", styles["h2"]))
+    # 3.10 output writers
+    story.append(Paragraph("3.10  wide_writer.py / db_writer.py — Output Writers", styles["h2"]))
     story += module_card(
-        "NormalizedOutputWriter", "sinks.py",
-        "Serializes NormalizedField records to: CSV file (write_csv), "
-        "JSON Lines file (write_jsonl), Python list of dicts (to_list), "
-        "Pandas DataFrame (to_dataframe), printed markdown table (print_table). "
-        "All writers accept an Iterator[NormalizedField] and work with the streaming pipeline.",
+        "WidePivotWriter", "wide_writer.py",
+        "Pivots the long NormalizedField stream into WIDE rows: one row per record, "
+        "each field a column, multi/sub-values expanded into indexed columns "
+        "(e.g. TAX.ID_1, TAX.ID_2). Can emit wide CSV, JSONL, or a Pandas DataFrame.",
+        styles
+    )
+    story += module_card(
+        "WideDatabaseWriter", "db_writer.py",
+        "Writes the wide result back into PostgreSQL, one table per application "
+        "(<APP>_wide). Manages DDL automatically (create-if-missing, add new columns, "
+        "ensure a UNIQUE key) and UPSERTs rows (INSERT ... ON CONFLICT DO UPDATE). "
+        "Optional, safety-gated full sync also deletes rows whose key vanished from "
+        "the source. Streaming (per-row) or batching write modes.",
         styles
     )
 
@@ -849,34 +858,27 @@ def build_execution_guide(styles):
     # Step 4
     story.append(Paragraph("4.4  Step 4: Run the Pipeline", styles["h2"]))
     story += code_block([
-        "from t24_adapter import NormalizedOutputWriter",
+        "from t24_adapter import WideDatabaseWriter, WidePivotWriter",
         "from pathlib import Path",
         "",
-        "# --- Option A: Write to CSV (streaming, low memory) ---",
-        "NormalizedOutputWriter.write_csv(",
-        "    rows=pipeline.run(),",
-        "    output_file=Path('output/result.csv')",
-        ")",
+        "# --- Default: UPSERT the wide result into PostgreSQL (one table/app) ---",
+        "WideDatabaseWriter(",
+        "    schema=config.db_schema, suffix=config.db_output_suffix,",
+        "    write_mode=config.db_write_mode,   # 'streaming' | 'batching'",
+        "    full_sync=config.db_full_sync,     # mirror source deletions (gated)",
+        ").write(pipeline)",
         "",
-        "# --- Option B: Write to JSON Lines ---",
-        "NormalizedOutputWriter.write_jsonl(",
-        "    rows=pipeline.run(),",
-        "    output_file=Path('output/result.jsonl')",
-        ")",
-        "",
-        "# --- Option C: Load into Pandas DataFrame ---",
-        "df = NormalizedOutputWriter.to_dataframe(pipeline.run())",
-        "print(df.head(20))",
-        "",
-        "# --- Option D: Iterate manually ---",
-        "for field in pipeline.run():",
-        "    print(field.field_name, field.value)",
+        "# --- Or emit the same wide rows to files / a DataFrame ---",
+        "wp = WidePivotWriter()",
+        "wp.write_csv(pipeline, Path('output'))     # one <APP>_wide.csv per app",
+        "wp.write_jsonl(pipeline, Path('output'))",
+        "df = wp.to_dataframe(pipeline, 'ACCOUNT')",
     ], styles, label="main.py — Output Options")
 
     story += warning_box(
-        "<b>Important:</b> pipeline.run() is a Python generator. Each call to .run() "
-        "re-executes the full pipeline from scratch. If you need both CSV and JSONL, "
-        "call pipeline.run() twice — once for each sink.",
+        "<b>Important:</b> pipeline.run() is a Python generator. The DB sink reads the "
+        "source exactly twice (discover the wide schema, then write); it never buffers "
+        "the whole dataset in memory.",
         styles
     )
 
@@ -899,13 +901,9 @@ def build_execution_guide(styles):
         "# Show fields with warnings",
         "warnings = df[df['warnings'].notna()]",
         "",
-        "# Pivot to wide format (one column per field)",
-        "wide = df.pivot_table(",
-        "    index='record_id',",
-        "    columns='field_name',",
-        "    values='value',",
-        "    aggfunc='first'",
-        ")",
+        "# Note: the wide pivot is built in — WidePivotWriter / WideDatabaseWriter",
+        "# already emit one row per record with one column per field, so no manual",
+        "# df.pivot_table() step is needed.",
     ], styles, label="Inspecting Output with Pandas")
 
     story.append(PageBreak())

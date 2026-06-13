@@ -91,41 +91,55 @@ class WideDatabaseWriter:
         """
         Pivot every application and upsert each into its own result table.
 
+        The source is read exactly twice, regardless of how many applications
+        there are: once to discover the wide schema, once to write. Pass 2
+        streams every app's rows in a single traversal and dispatches each to
+        its own per-app transaction (committed at the app boundary).
+
         Returns
         -------
         Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
-        schemas = self._pivot.discover_schema(pipeline.run())
+        schemas = self._pivot.discover_schema(pipeline.run())          # pass 1
         if not schemas:
             logger.warning("No records discovered; no result tables written.")
             return {}
 
         results: Dict[str, tuple] = {}
         conn = _connect_from_env()
+        sink = None
         try:
-            for app_name, app_schema in schemas.items():
-                table = f"{app_name}{self.suffix}"
-                columns = app_schema.columns
-                # One transaction per app: DDL + upserts + sweep commit together.
-                with conn.cursor() as cursor:
-                    self._ensure_table(cursor, table, columns)
-                    upserted, seen = self._upsert_rows(
-                        cursor, pipeline, app_schema, app_name, table, columns
-                    )
-                    deleted = self._sweep(cursor, table, seen)
-                conn.commit()
-                results[app_name] = (table, upserted, deleted, len(columns))
-                logger.info(
-                    f"Wrote {self.schema}.{table}: {upserted} upserted, "
-                    f"{deleted} deleted, {len(columns)} columns "
-                    f"(mode={self.write_mode})"
-                )
+            # pass 2 — single traversal of the whole source, app-grouped.
+            for app_name, row in self._pivot.iter_all_wide_rows(pipeline.run(), schemas):
+                if sink is None or sink.app_name != app_name:
+                    if sink is not None:
+                        results[sink.app_name] = sink.finalize()
+                    sink = _AppSink(self, conn, app_name, schemas[app_name])
+                sink.add(row)
+            if sink is not None:
+                results[sink.app_name] = sink.finalize()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
         return results
+
+    def _build_upsert_sql(self, cursor, table: str, columns: List[str]) -> str:
+        """Compose the INSERT … ON CONFLICT DO UPDATE statement for one table."""
+        from psycopg2 import sql
+
+        non_key = [c for c in columns if c != self.key_column]
+        return sql.SQL(
+            "INSERT INTO {}.{} ({}) VALUES %s ON CONFLICT ({}) DO UPDATE SET {}"
+        ).format(
+            sql.Identifier(self.schema), sql.Identifier(table),
+            sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+            sql.Identifier(self.key_column),
+            sql.SQL(", ").join(
+                sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c)) for c in non_key
+            ),
+        ).as_string(cursor)
 
     # ------------------------------------------------------------------ #
     # DDL
@@ -208,49 +222,6 @@ class WideDatabaseWriter:
             ) from exc
 
     # ------------------------------------------------------------------ #
-    # DML — upsert
-    # ------------------------------------------------------------------ #
-
-    def _upsert_rows(self, cursor, pipeline, app_schema, app_name, table, columns):
-        """
-        Upsert all wide rows for one app. Returns (count, seen_keys_set).
-        Streaming uses flush size 1; batching uses db_batch_size.
-        """
-        from psycopg2 import sql
-        from psycopg2.extras import execute_values
-
-        non_key = [c for c in columns if c != self.key_column]
-        upsert_sql = sql.SQL(
-            "INSERT INTO {}.{} ({}) VALUES %s "
-            "ON CONFLICT ({}) DO UPDATE SET {}"
-        ).format(
-            sql.Identifier(self.schema), sql.Identifier(table),
-            sql.SQL(", ").join(sql.Identifier(c) for c in columns),
-            sql.Identifier(self.key_column),
-            sql.SQL(", ").join(
-                sql.SQL("{0} = EXCLUDED.{0}").format(sql.Identifier(c)) for c in non_key
-            ),
-        ).as_string(cursor)
-
-        def to_tuple(row):
-            return tuple(None if row[c] == "" else row[c] for c in columns)
-
-        seen = set()
-        batch = []
-        total = 0
-        for row in self._pivot.iter_wide_rows(pipeline.run(), app_schema, app_name):
-            seen.add(row[self.key_column])
-            batch.append(to_tuple(row))
-            if len(batch) >= self.batch_size:
-                execute_values(cursor, upsert_sql, batch)
-                total += len(batch)
-                batch = []
-        if batch:
-            execute_values(cursor, upsert_sql, batch)
-            total += len(batch)
-        return total, seen
-
-    # ------------------------------------------------------------------ #
     # Full-sync delete-sweep (safety-gated)
     # ------------------------------------------------------------------ #
 
@@ -297,3 +268,54 @@ class WideDatabaseWriter:
         if deleted:
             logger.info(f"Full sync: deleted {deleted} stale row(s) from {self.schema}.{table}")
         return deleted
+
+
+class _AppSink:
+    """
+    Per-application writer used during the single write pass. Holds one
+    transaction (its own cursor), batches upserts, and on finalize() runs the
+    delete-sweep and commits — so each application's table is written
+    atomically, exactly as before, but the source is streamed only once
+    across all apps.
+    """
+
+    def __init__(self, writer: "WideDatabaseWriter", conn, app_name: str, schema):
+        self.writer = writer
+        self.conn = conn
+        self.app_name = app_name
+        self.table = f"{app_name}{writer.suffix}"
+        self.columns = schema.columns
+        self.cursor = conn.cursor()
+        writer._ensure_table(self.cursor, self.table, self.columns)
+        self._upsert_sql = writer._build_upsert_sql(self.cursor, self.table, self.columns)
+        self._batch: List[tuple] = []
+        self.seen: set = set()
+        self.upserted = 0
+
+    def add(self, row: Dict[str, str]) -> None:
+        self.seen.add(row[self.writer.key_column])
+        self._batch.append(
+            tuple(None if row[c] == "" else row[c] for c in self.columns)
+        )
+        if len(self._batch) >= self.writer.batch_size:
+            self._flush()
+
+    def _flush(self) -> None:
+        if not self._batch:
+            return
+        from psycopg2.extras import execute_values
+        execute_values(self.cursor, self._upsert_sql, self._batch)
+        self.upserted += len(self._batch)
+        self._batch = []
+
+    def finalize(self) -> tuple:
+        self._flush()
+        deleted = self.writer._sweep(self.cursor, self.table, self.seen)
+        self.cursor.close()
+        self.conn.commit()
+        logger.info(
+            f"Wrote {self.writer.schema}.{self.table}: {self.upserted} upserted, "
+            f"{deleted} deleted, {len(self.columns)} columns "
+            f"(mode={self.writer.write_mode})"
+        )
+        return (self.table, self.upserted, deleted, len(self.columns))

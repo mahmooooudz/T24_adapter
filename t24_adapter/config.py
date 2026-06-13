@@ -9,7 +9,7 @@ All business meaning comes from metadata files.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -161,6 +161,11 @@ class T24PipelineConfig:
     # this run, so deletions in the source are mirrored. SAFETY-GATED — only
     # runs on a complete, unfiltered, cleanly-finished run (see db_writer).
     db_full_sync: bool = False
+
+    # Set True whenever a run is narrowed (e.g. a date/module filter) so the
+    # full-sync delete-sweep is disabled — a partial run must never delete
+    # rows that were simply filtered out. Wired into the writer's guard.
+    db_filters_active: bool = False
 
     def resolve(self, relative_dir: str) -> Path:
         """Return absolute path for a subdirectory under package_root."""
