@@ -167,6 +167,16 @@ class T24PipelineConfig:
     # rows that were simply filtered out. Wired into the writer's guard.
     db_filters_active: bool = False
 
+    # ------------------------------------------------------------------ #
+    # Application selection
+    # ------------------------------------------------------------------ #
+    # Optional allowlist of application (table) names to process. When None
+    # (default) every discovered application is processed — the original
+    # behaviour. When set, discovery is narrowed to just these names (case-
+    # insensitive), so a caller (e.g. the web console) can run a chosen
+    # subset of tables. Names not present in the source are ignored.
+    include_applications: Optional[Tuple[str, ...]] = None
+
     def resolve(self, relative_dir: str) -> Path:
         """Return absolute path for a subdirectory under package_root."""
         return self.package_root / relative_dir

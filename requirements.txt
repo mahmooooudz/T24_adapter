@@ -5,3 +5,4 @@
 psycopg2-binary>=2.9    # PostgreSQL driver (database source + sink)
 pandas>=2.0             # optional: DataFrame preview / analysis
 tabulate>=0.9           # optional: pretty console preview tables
+Flask>=3.0              # web console backend (app.py)

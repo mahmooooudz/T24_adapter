@@ -285,6 +285,24 @@ class T24GenericPipeline:
                     "Ensure data/*.xml files exist."
                 )
 
+        # Optional allowlist: narrow to a caller-chosen subset of applications
+        # (e.g. the web console's table selection). Matching is case-insensitive.
+        if self.config.include_applications:
+            wanted = {a.upper() for a in self.config.include_applications}
+            selected = [a for a in applications if a.upper() in wanted]
+            missing = wanted - {a.upper() for a in applications}
+            if missing:
+                logger.warning(
+                    f"Requested applications not found in source and skipped: "
+                    f"{sorted(missing)}"
+                )
+            applications = selected
+            if not applications:
+                raise RuntimeError(
+                    "None of the requested applications "
+                    f"({sorted(wanted)}) were found in the source."
+                )
+
         logger.info(f"Applications to process: {applications}")
 
         # === STAGE 3-5: Per-Application Processing ===
