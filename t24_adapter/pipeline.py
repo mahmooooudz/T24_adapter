@@ -74,16 +74,24 @@ class T24MetadataOrchestrator:
         self.discovery = discovery
         self.registry = T24MetadataRegistry()
         # Optional database-backed STANDARD.SELECTION source.
-        self.metadata_reader = (
-            T24DatabaseMetadataReader(
+        self.metadata_reader = self._make_db_reader(config, config.db_metadata_table)
+        # Optional database-backed LOCAL.REF and CUSTOMIZATION sources. These
+        # tables share STANDARD_SELECTION's layout (one row per app, keyed by
+        # the app name, metadata XML in the same key/xml columns).
+        self.local_ref_reader = self._make_db_reader(config, config.db_local_ref_table)
+        self.customization_reader = self._make_db_reader(config, config.db_customization_table)
+
+    @staticmethod
+    def _make_db_reader(config: T24PipelineConfig, table):
+        """Build a metadata reader for `table`, or None if not in DB mode / unset."""
+        if config.source == "database" and table:
+            return T24DatabaseMetadataReader(
                 schema=config.db_schema,
-                table=config.db_metadata_table,
+                table=table,
                 key_column=config.db_metadata_key_column,
                 xml_column=config.db_metadata_xml_column,
             )
-            if config.source == "database" and config.db_metadata_table
-            else None
-        )
+        return None
 
     def load_for_application(self, app_name: str) -> T24MetadataRegistry:
         """
@@ -97,26 +105,16 @@ class T24MetadataOrchestrator:
         -------
         T24MetadataRegistry populated with all available metadata
         """
-        local_ref_file = self.discovery.get_local_ref_file(app_name)
-        customization_file = self.discovery.get_customization_file(app_name)
         relationship_file = self.discovery.get_relationship_file(app_name)
 
         # --- STANDARD.SELECTION (database first if configured, else file) ---
         self._load_standard_selection(app_name)
 
-        # --- LOCAL.REF (optional but logged if absent) ---
-        if local_ref_file:
-            LocalReferenceLoader().load(app_name, local_ref_file, self.registry)
-        else:
-            logger.warning(
-                f"No LOCAL.REF file found for {app_name}. "
-                f"Local reference fields (c64 m-values) may appear as FIELD_64.N "
-                f"unless they are already defined in STANDARD.SELECTION."
-            )
+        # --- LOCAL.REF (database first if configured, else file) ---
+        self._load_local_ref(app_name)
 
-        # --- CUSTOMIZATION (optional) ---
-        if customization_file:
-            CustomizationLoader().load(app_name, customization_file, self.registry)
+        # --- CUSTOMIZATION (database first if configured, else file) ---
+        self._load_customization(app_name)
 
         # --- RELATIONSHIPS (optional or required) ---
         if relationship_file:
@@ -172,6 +170,66 @@ class T24MetadataOrchestrator:
             )
         if standard_file:
             StandardSelectionLoader().load(app_name, standard_file, self.registry)
+
+    def _load_local_ref(self, app_name: str) -> None:
+        """
+        Load LOCAL.REF for one application: database table first (if
+        db_local_ref_table is configured), else the local_ref/ file. A missing
+        DB row falls back to the file; a missing file is only a warning.
+        """
+        if self.local_ref_reader is not None:
+            xml_text = self.local_ref_reader.fetch_xml(app_name)
+            if xml_text:
+                source = (
+                    f"{self.config.db_schema}.{self.config.db_local_ref_table}"
+                    f"#{app_name}"
+                )
+                LocalReferenceLoader().load_from_string(
+                    app_name, xml_text, self.registry, source=source
+                )
+                return
+            logger.warning(
+                f"[{app_name}] No LOCAL.REF row in "
+                f"{self.config.db_schema}.{self.config.db_local_ref_table}; "
+                f"falling back to file metadata."
+            )
+
+        local_ref_file = self.discovery.get_local_ref_file(app_name)
+        if local_ref_file:
+            LocalReferenceLoader().load(app_name, local_ref_file, self.registry)
+        else:
+            logger.warning(
+                f"No LOCAL.REF metadata for {app_name} (no database row and no "
+                f"file). Local reference fields (c64 m-values) may appear as "
+                f"FIELD_64.N unless defined in STANDARD.SELECTION."
+            )
+
+    def _load_customization(self, app_name: str) -> None:
+        """
+        Load CUSTOMIZATION for one application: database table first (if
+        db_customization_table is configured), else the customization/ file.
+        Both sources are optional.
+        """
+        if self.customization_reader is not None:
+            xml_text = self.customization_reader.fetch_xml(app_name)
+            if xml_text:
+                source = (
+                    f"{self.config.db_schema}.{self.config.db_customization_table}"
+                    f"#{app_name}"
+                )
+                CustomizationLoader().load_from_string(
+                    app_name, xml_text, self.registry, source=source
+                )
+                return
+            logger.warning(
+                f"[{app_name}] No CUSTOMIZATION row in "
+                f"{self.config.db_schema}.{self.config.db_customization_table}; "
+                f"falling back to file metadata."
+            )
+
+        customization_file = self.discovery.get_customization_file(app_name)
+        if customization_file:
+            CustomizationLoader().load(app_name, customization_file, self.registry)
 
     def _validate_local_ref_coverage(self, app_name: str) -> None:
         """
@@ -269,7 +327,11 @@ class T24GenericPipeline:
             # Dynamic: every base table in the schema (except the metadata
             # table) is an application, keyed by its own name. No hardcoding.
             applications = self.db_reader.discover_tables(
-                exclude={self.config.db_metadata_table},
+                exclude={
+                    self.config.db_metadata_table,
+                    self.config.db_local_ref_table,
+                    self.config.db_customization_table,
+                },
                 exclude_suffixes=(self.config.db_output_suffix,),
             )
             if not applications:

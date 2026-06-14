@@ -230,14 +230,38 @@ class LocalReferenceLoader:
         file_path: Path,
         registry: T24MetadataRegistry
     ) -> None:
+        """Load LOCAL.REF metadata from an XML file."""
         logger.info(f"Loading LOCAL.REF for '{app_name}' from: {file_path.name}")
-
         tree = ET.parse(file_path)
-        root = tree.getroot()
+        self._register_from_root(app_name, tree.getroot(), registry, str(file_path))
 
+    def load_from_string(
+        self,
+        app_name: str,
+        xml_text: str,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
+        """
+        Load LOCAL.REF metadata from an XML string (e.g. a database column)
+        instead of a file. Encodes to bytes first so an `<?xml ... encoding?>`
+        declaration is accepted.
+        """
+        logger.info(f"Loading LOCAL.REF for '{app_name}' from: {source}")
+        root = ET.fromstring(str(xml_text).encode("utf-8"))
+        self._register_from_root(app_name, root, registry, source)
+
+    def _register_from_root(
+        self,
+        app_name: str,
+        root: ET.Element,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
+        # Repeated C-column shape is identical to STANDARD.SELECTION; reuse it.
         if self._looks_like_repeated_c_row(root):
-            logger.info(f"  Detected repeated-column style LOCAL.REF -> delegating to StandardSelectionLoader")
-            StandardSelectionLoader().load(app_name, file_path, registry)
+            logger.info("  Detected repeated-column style LOCAL.REF -> delegating to StandardSelectionLoader")
+            StandardSelectionLoader()._register_from_root(app_name, root, registry, source)
             return
 
         registered = 0
@@ -265,7 +289,7 @@ class LocalReferenceLoader:
                 description=self._child_text(field_node, {"DESCRIPTION", "DESC", "C11"}),
                 is_local_ref=True,
                 is_custom_field=True,
-                source=str(file_path)
+                source=source
             )
 
             registry.register_field(meta)
@@ -309,11 +333,30 @@ class CustomizationLoader:
         file_path: Path,
         registry: T24MetadataRegistry
     ) -> None:
+        """Load CUSTOMIZATION metadata from an XML file."""
         logger.info(f"Loading CUSTOMIZATION for '{app_name}' from: {file_path.name}")
-
         tree = ET.parse(file_path)
-        root = tree.getroot()
+        self._register_from_root(app_name, tree.getroot(), registry, str(file_path))
 
+    def load_from_string(
+        self,
+        app_name: str,
+        xml_text: str,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
+        """Load CUSTOMIZATION metadata from an XML string (e.g. a database column)."""
+        logger.info(f"Loading CUSTOMIZATION for '{app_name}' from: {source}")
+        root = ET.fromstring(str(xml_text).encode("utf-8"))
+        self._register_from_root(app_name, root, registry, source)
+
+    def _register_from_root(
+        self,
+        app_name: str,
+        root: ET.Element,
+        registry: T24MetadataRegistry,
+        source: str,
+    ) -> None:
         registered = 0
         for node in root.iter():
             tag = XmlUtils.strip_namespace(node.tag).upper()
@@ -339,7 +382,7 @@ class CustomizationLoader:
                 description=self._get(node, ["DESCRIPTION", "DESC"]),
                 is_local_ref="." in position,
                 is_custom_field=True,
-                source=str(file_path)
+                source=source
             )
 
             registry.register_field(meta)

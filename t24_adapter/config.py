@@ -120,6 +120,15 @@ class T24PipelineConfig:
     db_metadata_key_column: str = "recordId"
     db_metadata_xml_column: str = "xmlRecord"
 
+    # Optional: load LOCAL.REF and CUSTOMIZATION metadata from database tables
+    # shaped exactly like db_metadata_table — one row per application, keyed by
+    # the application/table name, with the metadata XML in the same key/xml
+    # columns (db_metadata_key_column / db_metadata_xml_column). When None,
+    # these are read from files (the original behaviour). When set, the DB is
+    # tried first and falls back to files (with a warning) if the row is absent.
+    db_local_ref_table: Optional[str] = None
+    db_customization_table: Optional[str] = None
+
     # Output (wide result) tables are written back into the same schema with
     # this suffix, e.g. ACCOUNT -> "ACCOUNT_wide". Discovery excludes any
     # table ending with this suffix so results are never re-ingested as input.

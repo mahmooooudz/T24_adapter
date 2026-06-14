@@ -49,6 +49,13 @@ def build_config() -> T24PipelineConfig:
         db_metadata_key_column="recordId",
         db_metadata_xml_column="xmlRecord",
 
+        # LOCAL.REF and CUSTOMIZATION metadata, also from the database. Same
+        # layout as STANDARD_SELECTION (one row per app, keyed by app name,
+        # XML in xmlRecord). Set these to your actual table names; if a table
+        # is absent the loader falls back to the file metadata with a warning.
+        db_local_ref_table="LOCAL_REFERENCE",
+        db_customization_table="CUSTOMIZATION",
+
         # Record key = the table's own recordId column.
         record_id_from_db_column=True,
         record_id_db_column="recordId",
