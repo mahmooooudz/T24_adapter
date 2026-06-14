@@ -187,7 +187,10 @@ def _build_config(payload: dict) -> T24PipelineConfig:
     if cfg.source == "database":
         cfg.db_schema = payload.get("schema") or cfg.db_schema
         # Metadata also from the DB by default (matches settings.py deployment).
+        # If a table is absent the reader falls back to file metadata gracefully.
         cfg.db_metadata_table = payload.get("metadataTable", "STANDARD_SELECTION")
+        cfg.db_local_ref_table = payload.get("localRefTable", "LOCAL_REFERENCE")
+        cfg.db_customization_table = payload.get("customizationTable", "CUSTOMIZATION")
         # A narrowed (subset) run must never trigger the full-sync delete sweep.
         cfg.db_filters_active = bool(tables)
     return cfg
@@ -272,7 +275,7 @@ def list_tables():
 
         reader = T24DatabaseDataReader(schema=cfg.db_schema)
         names = reader.discover_tables(
-            exclude={cfg.db_metadata_table},
+            exclude={cfg.db_metadata_table, cfg.db_local_ref_table, cfg.db_customization_table},
             exclude_suffixes=(cfg.db_output_suffix,),
         )
         tables = []
@@ -566,7 +569,35 @@ def index():
     return send_from_directory(str(BASE_DIR), CONSOLE_HTML)
 
 
+def _pick_port(preferred: int) -> int:
+    """Return `preferred` if it's free, otherwise an OS-assigned free port.
+
+    macOS often occupies port 5000 (AirPlay Receiver / ControlCenter), which
+    would otherwise crash the server with 'Address already in use'. This keeps
+    'just press Run' working without any manual port juggling.
+    """
+    import socket
+
+    def is_free(p: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                return True
+            except OSError:
+                return False
+
+    if is_free(preferred):
+        return preferred
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 if __name__ == "__main__":
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-    port = int(os.environ.get("PORT", "5000"))
+    requested = int(os.environ.get("PORT", "5000"))
+    port = _pick_port(requested)
+    if port != requested:
+        print(f"[t24] Port {requested} is busy; using free port {port} instead.")
+    print(f"[t24] T24 Flattening Console →  http://127.0.0.1:{port}")
     app.run(host="127.0.0.1", port=port, debug=False, threaded=True)
