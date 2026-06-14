@@ -293,20 +293,40 @@
 
     <!-- STEP 0 -->
     <section class="step" data-i="0">
-      <div class="info">&#128279; Enter your T24 source connection details, then test the link.</div>
-      <div class="card" style="max-width:640px">
-        <div class="grid-2">
-          <div class="fg"><div class="flabel">Database type</div><select><option>PostgreSQL</option><option>Oracle</option><option>SQL Server</option></select></div>
-          <div class="fg"><div class="flabel">Host</div><input type="text" value="192.168.1.10"></div>
-          <div class="fg"><div class="flabel">Port</div><input type="text" value="5432"></div>
-          <div class="fg"><div class="flabel">Service / database</div><input type="text" value="T24_DB"></div>
-          <div class="fg"><div class="flabel">Username</div><input type="text" value="admin"></div>
-          <div class="fg"><div class="flabel">Password</div><input type="password" value="password123"></div>
-          <div class="fg full"><div class="flabel">Schema</div><input type="text" value="T24_SCHEMA"></div>
+      <div class="info">&#128279; Choose your T24 source, then test the link before continuing.</div>
+      <div class="card" style="max-width:720px">
+        <div class="clabel">Saved connections</div>
+        <div id="connList"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn btn-ghost btn-sm" onclick="newConnection()">&#43; New connection</button>
         </div>
-        <div class="row" style="margin-top:18px">
-          <button class="btn btn-ghost" onclick="testConn(this)">Test connection</button>
-          <button class="btn btn-primary" onclick="go(1)">Connect &rarr;</button>
+      </div>
+
+      <div class="card" style="max-width:720px;margin-top:14px">
+        <div class="clabel" id="connEditorTitle">Connection details</div>
+        <div class="grid-2">
+          <div class="fg full dbonly"><div class="flabel">Connection name</div><input id="cConnName" type="text" placeholder="e.g. T24 Production"></div>
+          <div class="fg full"><div class="flabel">Source</div>
+            <select id="cType" onchange="onSourceChange()">
+              <option value="postgresql">PostgreSQL database</option>
+              <option value="files">Local XML package (t24_input_package)</option>
+              <option value="oracle">Oracle (not supported yet)</option>
+              <option value="sqlserver">SQL Server (not supported yet)</option>
+            </select>
+          </div>
+          <div class="fg dbonly"><div class="flabel">Host</div><input id="cHost" type="text" value="localhost"></div>
+          <div class="fg dbonly"><div class="flabel">Port</div><input id="cPort" type="text" value="5432"></div>
+          <div class="fg dbonly"><div class="flabel">Database</div><input id="cName" type="text" value="t24"></div>
+          <div class="fg dbonly"><div class="flabel">Username</div><input id="cUser" type="text" value="postgres"></div>
+          <div class="fg dbonly"><div class="flabel">Password</div><input id="cPass" type="password" value=""></div>
+          <div class="fg full dbonly"><div class="flabel">Schema</div><input id="cSchema" type="text" value="t24_adaptor"></div>
+        </div>
+        <label class="opt dbonly" style="margin-top:2px"><input id="cRemember" type="checkbox"><span class="radio" style="border-radius:6px"></span>Remember password in this browser</label>
+        <div class="row" style="margin-top:14px">
+          <button class="btn btn-ghost dbonly" id="saveConnBtn" onclick="saveConnection()">&#128190; Save connection</button>
+          <button class="btn btn-ghost" id="testBtn" onclick="testConn()">Test connection</button>
+          <span id="connStatus" style="font-size:13px;font-weight:600"></span>
+          <button class="btn btn-primary" style="margin-left:auto" onclick="connectAndContinue()">Connect &rarr;</button>
         </div>
       </div>
     </section>
@@ -315,14 +335,14 @@
     <section class="step" data-i="1">
       <div class="grid-3">
         <div class="card">
-          <div class="clabel">Schemas</div>
-          <div class="dbitem active" onclick="sdb(this)"><span class="ic">&#128451;</span>T24_PROD</div>
-          <div class="dbitem" onclick="sdb(this)"><span class="ic">&#128451;</span>T24_UAT</div>
-          <div class="dbitem" onclick="sdb(this)"><span class="ic">&#128451;</span>T24_DEV</div>
+          <div class="clabel">Source</div>
+          <div class="dbitem active"><span class="ic">&#128451;</span><span id="srcLabel">Local XML package</span></div>
+          <div style="font-size:12px;color:var(--text-3);margin-top:10px" id="srcMeta">Discovered from the live source.</div>
+          <div class="row" style="margin-top:14px"><button class="btn btn-ghost btn-sm" onclick="loadTables()">&#8635; Refresh</button></div>
         </div>
         <div class="card">
-          <div class="clabel">Tables — T24_PROD</div>
-          <div id="tlist"></div>
+          <div class="clabel">Tables — <span id="tablesLabel">source</span></div>
+          <div id="tlist"><div style="font-size:13px;color:var(--text-3)">Loading…</div></div>
         </div>
         <div class="card">
           <div class="clabel">Selected · <span id="scnt">0</span></div>
@@ -342,28 +362,25 @@
           <div class="clabel">Output format</div>
           <label class="opt"><input type="radio" name="fmt" value="csv" checked><span class="radio"></span>CSV file</label>
           <label class="opt"><input type="radio" name="fmt" value="jsonl"><span class="radio"></span>JSON Lines</label>
-          <label class="opt"><input type="radio" name="fmt" value="xlsx"><span class="radio"></span>Excel workbook</label>
+          <label class="opt" style="opacity:.5"><input type="radio" name="fmt" value="xlsx" disabled><span class="radio"></span>Excel workbook <span style="font-size:11px;color:var(--text-3)">· not supported yet</span></label>
           <label class="opt"><input type="radio" name="fmt" value="db"><span class="radio"></span>Database table</label>
         </div>
         <div class="card">
           <div class="clabel">T24 handling</div>
-          <div class="toggle-row"><span>Multi-values</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
-          <div class="toggle-row"><span>Sub-values</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
-          <div class="toggle-row"><span>Local references</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
-          <div class="toggle-row"><span>Include unmapped fields</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
-          <div class="toggle-row"><span>Degrade unknowns to FIELD_N</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Multi-values <span style="font-size:11px;color:var(--text-3)">· always on</span></span><label class="tog"><input type="checkbox" checked disabled><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Sub-values <span style="font-size:11px;color:var(--text-3)">· always on</span></span><label class="tog"><input type="checkbox" checked disabled><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Local references <span style="font-size:11px;color:var(--text-3)">· always on</span></span><label class="tog"><input type="checkbox" checked disabled><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Include unmapped fields</span><label class="tog"><input id="optIncludeUnmapped" type="checkbox" checked><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Degrade unknowns to FIELD_N</span><label class="tog"><input id="optDegrade" type="checkbox" checked><span class="tslide"></span></label></div>
         </div>
         <div class="card" id="dbsec" style="display:none">
           <div class="clabel">Target database</div>
-          <div class="fg"><div class="flabel">Database</div><select><option>T24_DWH</option><option>Analytics_DB</option></select></div>
-          <div class="fg"><div class="flabel">Schema</div><select><option>staging</option><option>t24_flattened</option><option>public</option></select></div>
-          <div class="fg"><div class="flabel">Table name</div><input type="text" value="FLATTENED_CUSTOMER"></div>
-          <div class="fg"><div class="flabel">Write mode</div><select><option>Truncate &amp; Load</option><option>Append</option><option>Overwrite</option></select></div>
+          <div class="info" style="margin-bottom:0">Each table is written to <b style="margin:0 4px">&lt;schema&gt;.&lt;APP&gt;_wide</b> in the connection schema, via UPSERT (insert new / update changed).</div>
         </div>
         <div class="card">
           <div class="clabel">Position resolution</div>
-          <div class="toggle-row"><span>Resolve field positions</span><label class="tog"><input type="checkbox" checked><span class="tslide"></span></label></div>
-          <div class="toggle-row"><span>Include metadata columns</span><label class="tog"><input type="checkbox"><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Resolve field positions <span style="font-size:11px;color:var(--text-3)">· always on</span></span><label class="tog"><input type="checkbox" checked disabled><span class="tslide"></span></label></div>
+          <div class="toggle-row"><span>Include metadata columns <span style="font-size:11px;color:var(--text-3)">· not supported yet</span></span><label class="tog"><input type="checkbox" disabled><span class="tslide"></span></label></div>
         </div>
       </div>
       <div class="row">
@@ -374,23 +391,19 @@
 
     <!-- STEP 3 -->
     <section class="step" data-i="3">
-      <div class="info">&#128269; Optionally limit the extraction to a module or date range.</div>
-      <div class="card" style="max-width:580px">
+      <div class="info">&#128269; Date / module range filtering is not implemented in the engine yet — these controls are disabled. The run processes the tables you selected in step 2, in full.</div>
+      <div class="card" style="max-width:580px;opacity:.6;pointer-events:none">
         <div class="fg"><div class="flabel">Application / module</div>
-          <select><option>CUSTOMER</option><option>ACCOUNT</option><option>FUNDS_TRANSFER</option><option>ALL</option></select></div>
+          <select disabled><option>All selected tables</option></select></div>
         <div class="grid-2">
-          <div class="fg"><div class="flabel">From date</div><input type="date" value="2026-01-01"></div>
-          <div class="fg"><div class="flabel">To date</div><input type="date" value="2026-01-31"></div>
+          <div class="fg"><div class="flabel">From date</div><input type="date" disabled></div>
+          <div class="fg"><div class="flabel">To date</div><input type="date" disabled></div>
         </div>
         <div class="fg"><div class="flabel">Date column</div>
-          <select><option>CREATED_DATE</option><option>BOOKING_DATE</option><option>DATE_TIME</option><option>LAST_UPD</option></select></div>
-        <div style="background:#fff;border:1px solid var(--stroke);border-radius:var(--r);padding:13px 15px;font-size:13px;color:var(--text-2);margin-top:4px;box-shadow:var(--shadow-sm)">
-          Flattening <b style="color:var(--text)">CUSTOMER</b> · <b style="color:var(--text)">01–31 Jan 2026</b> · on <b style="color:var(--text)">CREATED_DATE</b>
-        </div>
+          <select disabled><option>—</option></select></div>
       </div>
       <div class="row">
         <button class="btn btn-ghost" onclick="go(2)">&larr; Back</button>
-        <button class="btn btn-ghost" onclick="alert('Preview — coming soon')">&#128065; Preview data</button>
         <button class="btn btn-primary" onclick="go(4)">&#9654; Go to execute</button>
       </div>
     </section>
@@ -398,28 +411,15 @@
     <!-- STEP 4 -->
     <section class="step" data-i="4">
       <div class="grid-4" style="margin-bottom:16px">
-        <div class="stat"><div class="sl">Tables queued</div><div class="sv">2</div></div>
-        <div class="stat"><div class="sl">Records total</div><div class="sv">2.0M</div></div>
+        <div class="stat"><div class="sl">Tables queued</div><div class="sv" id="stQueued">0</div></div>
+        <div class="stat"><div class="sl">Records total</div><div class="sv" id="stTotal">0</div></div>
         <div class="stat"><div class="sl">Processed</div><div class="sv" id="pcnt">0</div></div>
         <div class="stat"><div class="sl">Elapsed</div><div class="sv" id="elap">0s</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
         <table class="ptable">
           <thead><tr><th>Table</th><th style="width:38%">Progress</th><th>Records</th><th>Status</th></tr></thead>
-          <tbody>
-            <tr>
-              <td class="mono" style="font-size:13px">CUSTOMER</td>
-              <td><div class="pbwrap"><div class="pbfill" id="bc"></div></div></td>
-              <td class="rc" id="rc">0 / 1,200,000</td>
-              <td><span class="badge b-pend" id="sc">Pending</span></td>
-            </tr>
-            <tr>
-              <td class="mono" style="font-size:13px">ACCOUNT</td>
-              <td><div class="pbwrap"><div class="pbfill" id="ba"></div></div></td>
-              <td class="rc" id="ra">0 / 800,000</td>
-              <td><span class="badge b-pend" id="sa">Pending</span></td>
-            </tr>
-          </tbody>
+          <tbody id="ptbody"></tbody>
         </table>
       </div>
       <div class="term" id="termwrap" style="display:none;margin-bottom:16px">
@@ -437,30 +437,16 @@
     <section class="step" data-i="5">
       <div class="check"><svg viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></svg></div>
       <div class="grid-4" style="margin-bottom:16px">
-        <div class="stat"><div class="sl">Total records</div><div class="sv" data-count="2000000">0</div></div>
+        <div class="stat"><div class="sl">Total records</div><div class="sv" id="rTotal">0</div></div>
         <div class="stat"><div class="sl">Fields mapped</div>
           <div class="ring-wrap"><div class="ring" id="ring"><b id="ringv">0%</b></div></div>
         </div>
-        <div class="stat"><div class="sl">Warnings</div><div class="sv" style="color:var(--amber)" data-count="12">0</div></div>
-        <div class="stat"><div class="sl">Errors</div><div class="sv" style="color:var(--green)">0</div></div>
+        <div class="stat"><div class="sl">Warnings</div><div class="sv" style="color:var(--amber)" id="rWarn">0</div></div>
+        <div class="stat"><div class="sl">Errors</div><div class="sv" style="color:var(--green)" id="rErr">0</div></div>
       </div>
       <div class="card" style="margin-bottom:14px">
         <div class="clabel">Output files</div>
-        <div class="file"><span class="ic">&#128196;</span><div style="flex:1"><div class="fn mono">customer_flattened.csv</div><div class="fm">1,200,000 records · 95% mapped · CUSTOMER</div></div><button class="btn btn-ghost btn-sm">&#8595; Download</button></div>
-        <div class="file"><span class="ic">&#128196;</span><div style="flex:1"><div class="fn mono">account_flattened.csv</div><div class="fm">800,000 records · 97% mapped · ACCOUNT</div></div><button class="btn btn-ghost btn-sm">&#8595; Download</button></div>
-      </div>
-      <div class="card">
-        <div class="clabel">Run log</div>
-        <div class="term"><div class="term-body" style="height:auto;max-height:210px">
-          <div><span class="l-ok">[OK]</span>   Connected to T24_PROD · schema T24_SCHEMA</div>
-          <div><span class="l-info">[INFO]</span> CUSTOMER: extracting 1,200,000 records…</div>
-          <div><span class="l-info">[INFO]</span> CUSTOMER: resolved 458 multi-value · 212 sub-value fields</div>
-          <div><span class="l-warn">[WARN]</span> CUSTOMER: 12 unknown fields degraded to FIELD_N</div>
-          <div><span class="l-ok">[OK]</span>   CUSTOMER complete in 42.3s → customer_flattened.csv</div>
-          <div><span class="l-info">[INFO]</span> ACCOUNT: extracting 800,000 records…</div>
-          <div><span class="l-ok">[OK]</span>   ACCOUNT complete in 28.1s → account_flattened.csv</div>
-          <div><span class="l-ok">[OK]</span>   Pipeline complete · 2,000,000 records · 0 errors</div>
-        </div></div>
+        <div id="fileList"></div>
       </div>
       <div class="row">
         <button class="btn btn-ghost" onclick="go(1)">&#8635; New run</button>
@@ -472,27 +458,156 @@
 </div>
 
 <script>
-/* ---------- data ---------- */
-const TABLES = [
-  {n:'CUSTOMER', c:'1.2M', sel:true},
-  {n:'ACCOUNT', c:'800K', sel:true},
-  {n:'FUNDS_TRANSFER', c:'3.5M', sel:false},
-  {n:'CUSTOMER_LOCAL_REF', c:'420K', sel:false},
-  {n:'STD_SELECTION', c:'90K', sel:false},
-];
+/* ===================================================================
+   T24 Flattening Console — wired to the real backend (app.py).
+   No simulated data: tables, counts, progress and stats are all live.
+   =================================================================== */
 const META = [
-  {t:'Connect to T24', s:'Point the console at your T24 source database.'},
+  {t:'Connect to T24', s:'Point the console at your T24 source.'},
   {t:'Choose tables', s:'Pick the T24 applications to flatten.'},
   {t:'Configuration', s:'Set output format and how T24 structures are resolved.'},
   {t:'Filters', s:'Optionally narrow the extraction scope.'},
   {t:'Execute', s:'Run the flattening pipeline and watch it live.'},
   {t:'Results', s:'Your flattened, analytics-ready output.'},
 ];
-const selected = new Set();
+const selected = new Set();   // selected table names (uppercase)
+let TABLEINFO = {};           // name -> record count
+let tablesLoaded = false;
+let runId = null, es = null, elapTimer = null, elapStart = 0;
+
+function api(path, body){
+  return fetch(path, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body||{})}).then(r => r.json());
+}
+function srcPayload(){
+  const type = document.getElementById('cType').value;
+  const source = (type === 'files') ? 'files' : 'database';
+  return {
+    source, dbType: type,
+    schema: document.getElementById('cSchema').value,
+    conn: {
+      host: document.getElementById('cHost').value,
+      port: document.getElementById('cPort').value,
+      database: document.getElementById('cName').value,
+      username: document.getElementById('cUser').value,
+      password: document.getElementById('cPass').value,
+    },
+  };
+}
+
+/* ---------- saved connections (browser localStorage only) ---------- */
+const CONN_KEY = 't24_connections';
+let selectedConnId = null;
+function loadConns(){ try { return JSON.parse(localStorage.getItem(CONN_KEY)) || []; } catch(e){ return []; } }
+function storeConns(a){ localStorage.setItem(CONN_KEY, JSON.stringify(a)); }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
+
+function renderConns(){
+  const list = document.getElementById('connList'); list.innerHTML = '';
+  // Built-in source that needs no credentials.
+  const xml = document.createElement('div');
+  xml.className = 'dbitem' + (selectedConnId === '__files__' ? ' active' : '');
+  xml.innerHTML = '<span class="ic">&#128193;</span><span style="flex:1">Local XML package</span><span class="rc">no credentials</span>';
+  xml.onclick = () => selectFiles();
+  list.appendChild(xml);
+
+  const conns = loadConns();
+  if (!conns.length){
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:12px;color:var(--text-3);margin:9px 2px 2px';
+    hint.textContent = 'No saved database connections yet — fill the form below and click Save connection.';
+    list.appendChild(hint);
+  }
+  conns.forEach(c => {
+    const it = document.createElement('div');
+    it.className = 'dbitem' + (selectedConnId === c.id ? ' active' : '');
+    const meta = esc(c.username||'') + '@' + esc(c.host||'') + (c.database ? '/'+esc(c.database) : '');
+    it.innerHTML = `<span class="ic">&#128451;</span>
+      <span style="flex:1"><b>${esc(c.name)}</b> <span class="rc" style="margin-left:6px">${meta}</span>
+      ${c.remember ? '' : '<span class="rc" style="margin-left:6px">· pwd not stored</span>'}</span>
+      <button class="conn-del" title="Delete" style="background:none;border:none;color:var(--text-3);cursor:pointer;font-size:18px;line-height:1;padding:0 2px">&times;</button>`;
+    it.onclick = () => selectConn(c.id);
+    it.querySelector('.conn-del').onclick = (e) => { e.stopPropagation(); deleteConn(c.id); };
+    list.appendChild(it);
+  });
+}
+function selectFiles(){
+  selectedConnId = '__files__';
+  document.getElementById('cType').value = 'files';
+  document.getElementById('connEditorTitle').textContent = 'Local XML package';
+  onSourceChange(); renderConns();
+}
+function selectConn(id){
+  const c = loadConns().find(x => x.id === id); if (!c) return;
+  selectedConnId = id;
+  document.getElementById('cConnName').value = c.name || '';
+  document.getElementById('cType').value = c.type || 'postgresql';
+  document.getElementById('cHost').value = c.host || '';
+  document.getElementById('cPort').value = c.port || '';
+  document.getElementById('cName').value = c.database || '';
+  document.getElementById('cUser').value = c.username || '';
+  document.getElementById('cSchema').value = c.schema || '';
+  document.getElementById('cRemember').checked = !!c.remember;
+  document.getElementById('cPass').value = c.remember ? (c.password || '') : '';
+  document.getElementById('connEditorTitle').textContent = 'Connection · ' + c.name;
+  onSourceChange();
+  const st = document.getElementById('connStatus');
+  if (c.remember){ st.textContent = ''; }
+  else { st.style.color = 'var(--text-3)'; st.textContent = 'Enter the password for this connection.'; }
+  renderConns();
+}
+function newConnection(){
+  selectedConnId = null;
+  document.getElementById('cConnName').value = '';
+  document.getElementById('cType').value = 'postgresql';
+  document.getElementById('cHost').value = 'localhost';
+  document.getElementById('cPort').value = '5432';
+  document.getElementById('cName').value = 't24';
+  document.getElementById('cUser').value = 'postgres';
+  document.getElementById('cPass').value = '';
+  document.getElementById('cSchema').value = 't24_adaptor';
+  document.getElementById('cRemember').checked = false;
+  document.getElementById('connStatus').textContent = '';
+  document.getElementById('connEditorTitle').textContent = 'New connection';
+  onSourceChange(); renderConns();
+  document.getElementById('cConnName').focus();
+}
+function saveConnection(){
+  if (document.getElementById('cType').value === 'files') return;  // built-in, nothing to save
+  const name = document.getElementById('cConnName').value.trim();
+  const st = document.getElementById('connStatus');
+  if (!name){ st.style.color = 'var(--red)'; st.textContent = '✕ Give the connection a name first.'; return; }
+  const remember = document.getElementById('cRemember').checked;
+  const conn = {
+    id: (selectedConnId && selectedConnId !== '__files__') ? selectedConnId : ('c' + Date.now()),
+    name,
+    type: document.getElementById('cType').value,
+    host: document.getElementById('cHost').value,
+    port: document.getElementById('cPort').value,
+    database: document.getElementById('cName').value,
+    username: document.getElementById('cUser').value,
+    schema: document.getElementById('cSchema').value,
+    remember,
+  };
+  if (remember) conn.password = document.getElementById('cPass').value;
+  const arr = loadConns(); const i = arr.findIndex(x => x.id === conn.id);
+  if (i >= 0) arr[i] = conn; else arr.push(conn);
+  storeConns(arr);
+  selectedConnId = conn.id;
+  st.style.color = 'var(--green)';
+  st.textContent = '✓ Saved' + (remember ? '' : ' (password not stored)');
+  document.getElementById('connEditorTitle').textContent = 'Connection · ' + conn.name;
+  renderConns();
+}
+function deleteConn(id){
+  storeConns(loadConns().filter(x => x.id !== id));
+  if (selectedConnId === id) selectedConnId = null;
+  renderConns();
+}
 
 /* ---------- navigation ---------- */
 let cur = 0;
-function go(n) {
+function go(n){
   cur = n;
   document.querySelectorAll('.step').forEach(s => s.classList.toggle('active', +s.dataset.i === n));
   document.querySelectorAll('.step-link').forEach((b,i) => {
@@ -506,40 +621,71 @@ function go(n) {
   document.getElementById('psub').textContent = META[n].s;
   document.getElementById('scur').textContent = n+1;
   document.querySelector('.main').scrollTo({top:0, behavior:'smooth'});
-  if (n === 5) animateResults();
+  if (n === 1 && !tablesLoaded) loadTables();
 }
 
-function testConn(btn){ const o=btn.textContent; btn.textContent='Testing…'; btn.disabled=true;
-  setTimeout(()=>{ btn.textContent='✓ Connected'; btn.style.color='var(--green)'; btn.style.borderColor='rgba(21,145,107,.5)';
-    setTimeout(()=>{btn.textContent=o; btn.disabled=false; btn.style.color=''; btn.style.borderColor='';},1600); },900); }
-
-function sdb(el){ document.querySelectorAll('.dbitem').forEach(e=>e.classList.remove('active')); el.classList.add('active'); }
+/* ---------- connection ---------- */
+function onSourceChange(){
+  const type = document.getElementById('cType').value;
+  const showDb = (type !== 'files');
+  document.querySelectorAll('.dbonly').forEach(e => e.style.display = showDb ? '' : 'none');
+  document.getElementById('connStatus').textContent = '';
+  tablesLoaded = false;
+}
+function testConn(){
+  const btn = document.getElementById('testBtn'), st = document.getElementById('connStatus');
+  btn.disabled = true; st.style.color = 'var(--text-2)'; st.textContent = 'Testing…';
+  api('/api/test-connection', srcPayload()).then(r => {
+    st.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    st.textContent = (r.ok ? '✓ ' : '✕ ') + r.message;
+  }).catch(e => { st.style.color='var(--red)'; st.textContent = '✕ ' + e; })
+    .finally(() => { btn.disabled = false; });
+}
+function connectAndContinue(){
+  tablesLoaded = false;
+  const type = document.getElementById('cType').value;
+  document.getElementById('srcLabel').textContent =
+    (type === 'files') ? 'Local XML package'
+    : (document.getElementById('cSchema').value + ' @ ' + document.getElementById('cHost').value);
+  document.getElementById('tablesLabel').textContent =
+    (type === 'files') ? 'local package' : document.getElementById('cSchema').value;
+  go(1);
+}
 
 /* ---------- tables ---------- */
-function renderTables(){
-  const tl = document.getElementById('tlist'); tl.innerHTML='';
-  TABLES.forEach(t => {
-    if (t.sel) selected.add(t.n);
-    const row = document.createElement('div');
-    row.className = 'trow' + (t.sel?' sel':'');
-    row.dataset.n = t.n;
-    row.innerHTML = `<span class="cbx"><svg viewBox="0 0 14 14"><path d="M2 7l3.5 3.5L12 3"/></svg></span>
-      <span class="tname mono">${t.n}</span><span class="badge b-ready">Ready</span><span class="rc">${t.c}</span>`;
-    row.onclick = () => toggleTable(t.n);
-    tl.appendChild(row);
-  });
-  renderSelected();
+function loadTables(){
+  const tl = document.getElementById('tlist');
+  tl.innerHTML = '<div style="font-size:13px;color:var(--text-3)">Loading…</div>';
+  api('/api/tables', srcPayload()).then(r => {
+    if (!r.ok){ tl.innerHTML = '<div style="font-size:13px;color:var(--red)">'+ (r.message||'Failed to load tables') +'</div>'; return; }
+    tablesLoaded = true;
+    TABLEINFO = {}; tl.innerHTML = '';
+    document.getElementById('srcMeta').textContent = r.tables.length + ' application(s) discovered.';
+    if (!r.tables.length){ tl.innerHTML = '<div style="font-size:13px;color:var(--text-3)">No tables found.</div>'; }
+    r.tables.forEach(t => {
+      TABLEINFO[t.name] = t.records;
+      const row = document.createElement('div');
+      row.className = 'trow' + (selected.has(t.name) ? ' sel' : '');
+      row.dataset.n = t.name;
+      row.innerHTML = `<span class="cbx"><svg viewBox="0 0 14 14"><path d="M2 7l3.5 3.5L12 3"/></svg></span>
+        <span class="tname mono">${t.name}</span><span class="badge b-ready">Ready</span>
+        <span class="rc">${Number(t.records).toLocaleString()}</span>`;
+      row.onclick = () => toggleTable(t.name);
+      tl.appendChild(row);
+    });
+    renderSelected();
+  }).catch(e => { tl.innerHTML = '<div style="font-size:13px;color:var(--red)">'+ e +'</div>'; });
 }
 function toggleTable(n){
   const row = document.querySelector('.trow[data-n="'+n+'"]');
-  if (selected.has(n)) { selected.delete(n); row.classList.remove('sel'); }
-  else { selected.add(n); row.classList.add('sel'); }
+  if (selected.has(n)){ selected.delete(n); row && row.classList.remove('sel'); }
+  else { selected.add(n); row && row.classList.add('sel'); }
   renderSelected();
 }
 function renderSelected(){
-  const sl = document.getElementById('slist'); sl.innerHTML='';
+  const sl = document.getElementById('slist'); sl.innerHTML = '';
   selected.forEach(n => {
-    const d = document.createElement('div'); d.className='tag';
+    const d = document.createElement('div'); d.className = 'tag';
     d.innerHTML = `<span class="mono">${n}</span><button title="remove">&times;</button>`;
     d.querySelector('button').onclick = () => toggleTable(n);
     sl.appendChild(d);
@@ -547,69 +693,145 @@ function renderSelected(){
   document.getElementById('scnt').textContent = selected.size;
 }
 
-/* ---------- config ---------- */
+/* ---------- config: show DB target only for "Database table" ---------- */
 document.querySelectorAll('input[name=fmt]').forEach(r => r.addEventListener('change', () => {
   document.getElementById('dbsec').style.display =
     document.querySelector('input[name=fmt]:checked').value === 'db' ? 'block' : 'none';
 }));
+function selectedFormat(){ return (document.querySelector('input[name=fmt]:checked')||{}).value || 'csv'; }
+function runOptions(){
+  return {
+    includeUnmapped: document.getElementById('optIncludeUnmapped').checked,
+    degradeUnknown: document.getElementById('optDegrade').checked,
+  };
+}
 
 /* ---------- execute ---------- */
-let timer=null, el=0, cp=0, ap=0, cd=false, ad=false;
-function setSt(id,cls,txt){ const e=document.getElementById('s'+id); e.className='badge b-'+cls; e.textContent=txt; }
-function addLog(msg){ const log=document.getElementById('rlog'); const d=document.createElement('div'); d.innerHTML=msg; log.appendChild(d); log.scrollTop=99999; }
-
-function startRun(){
-  document.getElementById('startb').style.display='none';
-  document.getElementById('stopb').style.display='inline-flex';
-  document.getElementById('termwrap').style.display='block';
-  document.getElementById('rlog').innerHTML='';
-  addLog('<span class="l-dim">$ t24 flatten --tables CUSTOMER,ACCOUNT</span>');
-  addLog('<span class="l-ok">[OK]</span>   Connected to T24_PROD · starting pipeline…');
-  cp=0; ap=0; cd=false; ad=false; el=0;
-  setSt('c','run','Running'); setSt('a','pend','Pending');
-  timer=setInterval(()=>{
-    el++; document.getElementById('elap').textContent=el+'s';
-    if(!cd){
-      cp=Math.min(100, cp+Math.random()*4+2);
-      document.getElementById('bc').style.width=Math.round(cp)+'%';
-      document.getElementById('rc').textContent=Math.round(cp*12000).toLocaleString()+' / 1,200,000';
-      if(cp>=100){ cd=true; setSt('c','done','Done'); setSt('a','run','Running');
-        addLog('<span class="l-info">[INFO]</span> CUSTOMER: resolved 458 multi-value · 212 sub-value fields');
-        addLog('<span class="l-warn">[WARN]</span> CUSTOMER: 12 unknown fields degraded to FIELD_N');
-        addLog('<span class="l-ok">[OK]</span>   CUSTOMER complete → customer_flattened.csv'); }
-    } else if(!ad){
-      ap=Math.min(100, ap+Math.random()*5+3);
-      document.getElementById('ba').style.width=Math.round(ap)+'%';
-      document.getElementById('ra').textContent=Math.round(ap*8000).toLocaleString()+' / 800,000';
-      if(ap>=100){ ad=true; setSt('a','done','Done'); clearInterval(timer);
-        document.getElementById('stopb').style.display='none';
-        document.getElementById('dlb').style.display='inline-flex';
-        document.getElementById('pcnt').textContent='2.0M';
-        addLog('<span class="l-ok">[OK]</span>   ACCOUNT complete → account_flattened.csv');
-        addLog('<span class="l-ok">[OK]</span>   Pipeline complete · 2,000,000 records · 0 errors'); }
-    }
-    if(!cd||!ad){ document.getElementById('pcnt').textContent=((Math.round(cp*12000)+Math.round(ap*8000))/1e6).toFixed(2)+'M'; }
-  },180);
+function addLog(level, msg){
+  const log = document.getElementById('rlog');
+  const tag = {ok:'l-ok', info:'l-info', warn:'l-warn', err:'l-warn', dim:'l-dim'}[level] || 'l-dim';
+  const label = {ok:'[OK]  ', info:'[INFO]', warn:'[WARN]', err:'[ERR] ', dim:'  '}[level] || '';
+  const d = document.createElement('div');
+  d.innerHTML = '<span class="'+tag+'">'+label+'</span> ' + msg;
+  log.appendChild(d); log.scrollTop = 99999;
 }
-function stopRun(){ clearInterval(timer);
-  document.getElementById('stopb').style.display='none';
-  const b=document.getElementById('startb'); b.style.display='inline-flex'; b.innerHTML='&#9654; Resume'; }
-
-/* ---------- results animations ---------- */
-let resultsDone=false;
-function animateResults(){
-  if(resultsDone) return; resultsDone=true;
-  document.querySelectorAll('[data-count]').forEach(elm=>{
-    const target=+elm.dataset.count; let v=0; const step=target/40;
-    const t=setInterval(()=>{ v=Math.min(target,v+step); elm.textContent=Math.round(v).toLocaleString(); if(v>=target) clearInterval(t); },25);
+function buildProgressTable(){
+  const tb = document.getElementById('ptbody'); tb.innerHTML = '';
+  let total = 0;
+  [...selected].forEach(name => {
+    const recs = TABLEINFO[name] || 0; total += recs;
+    const tr = document.createElement('tr'); tr.dataset.app = name;
+    tr.innerHTML = `<td class="mono" style="font-size:13px">${name}</td>
+      <td><div class="pbwrap"><div class="pbfill" style="width:0"></div></div></td>
+      <td class="rc">0 / ${Number(recs).toLocaleString()}</td>
+      <td><span class="badge b-pend">Pending</span></td>`;
+    tb.appendChild(tr);
   });
-  let p=0; const ring=document.getElementById('ring'), rv=document.getElementById('ringv');
-  const rt=setInterval(()=>{ p=Math.min(95,p+3); ring.style.setProperty('--p',p); rv.textContent=p+'%'; if(p>=95) clearInterval(rt); },30);
+  document.getElementById('stQueued').textContent = selected.size;
+  document.getElementById('stTotal').textContent = Number(total).toLocaleString();
+  document.getElementById('pcnt').textContent = '0';
+}
+function updateProcessedTotal(){
+  let sum = 0;
+  document.querySelectorAll('#ptbody tr').forEach(tr => { sum += (+tr.dataset.proc || 0); });
+  document.getElementById('pcnt').textContent = Number(sum).toLocaleString();
+}
+function startRun(){
+  if (!selected.size){ alert('Select at least one table in step 2.'); return; }
+  buildProgressTable();
+  document.getElementById('startb').style.display = 'none';
+  document.getElementById('stopb').style.display = 'inline-flex';
+  document.getElementById('dlb').style.display = 'none';
+  document.getElementById('termwrap').style.display = 'block';
+  document.getElementById('rlog').innerHTML = '';
+  elapStart = Date.now();
+  clearInterval(elapTimer);
+  elapTimer = setInterval(() => {
+    document.getElementById('elap').textContent = Math.round((Date.now()-elapStart)/1000) + 's';
+  }, 500);
+
+  const payload = Object.assign(srcPayload(), {
+    tables: [...selected], format: selectedFormat(), options: runOptions(),
+  });
+  api('/api/run', payload).then(r => {
+    if (!r.ok){ addLog('err', r.message); endRun(); return; }
+    runId = r.runId;
+    openStream(runId);
+  }).catch(e => { addLog('err', String(e)); endRun(); });
+}
+function openStream(id){
+  es = new EventSource('/api/run/'+id+'/stream');
+  es.onmessage = ev => {
+    const m = JSON.parse(ev.data);
+    if (m.kind === 'log') addLog(m.level, m.message);
+    else if (m.kind === 'schema') applySchema(m.apps);
+    else if (m.kind === 'progress') applyProgress(m);
+    else if (m.kind === 'done'){ showResults(m.results); endRun(); es.close(); }
+    else if (m.kind === 'error'){ document.getElementById('rErr').textContent = '1'; endRun(); es.close(); }
+    else if (m.kind === 'stopped'){ endRun(); es.close(); }
+  };
+  es.onerror = () => { /* keep-alive gaps are normal; stream closes on terminal event */ };
+}
+function rowFor(app){ return document.querySelector('#ptbody tr[data-app="'+app+'"]'); }
+function applySchema(apps){
+  Object.entries(apps).forEach(([app, total]) => {
+    const tr = rowFor(app); if (!tr) return;
+    tr.querySelector('.rc').textContent = '0 / ' + Number(total).toLocaleString();
+    tr.dataset.total = total;
+  });
+}
+function applyProgress(m){
+  const tr = rowFor(m.app); if (!tr) return;
+  const total = m.total || +tr.dataset.total || 0;
+  const pct = total ? Math.min(100, Math.round(100*m.processed/total)) : (m.status==='done'?100:0);
+  tr.querySelector('.pbfill').style.width = pct + '%';
+  tr.querySelector('.rc').textContent = Number(m.processed).toLocaleString() + ' / ' + Number(total).toLocaleString();
+  tr.dataset.proc = m.processed;
+  const badge = tr.querySelector('.badge');
+  const map = {running:['b-run','Running'], done:['b-done','Done'], pending:['b-pend','Pending']};
+  const [cls, txt] = map[m.status] || map.pending;
+  badge.className = 'badge ' + cls; badge.textContent = txt;
+  updateProcessedTotal();
+}
+function endRun(){
+  clearInterval(elapTimer);
+  document.getElementById('stopb').style.display = 'none';
+  document.getElementById('startb').style.display = 'inline-flex';
+  document.getElementById('dlb').style.display = 'inline-flex';
+}
+function stopRun(){ if (runId) api('/api/run/'+runId+'/stop', {}); }
+
+/* ---------- results ---------- */
+function showResults(results){
+  results = results || {};
+  const entries = Object.entries(results);
+  let totalRec = 0, totalWarn = 0, mappedAcc = 0;
+  const fl = document.getElementById('fileList'); fl.innerHTML = '';
+  entries.forEach(([app, r]) => {
+    totalRec += r.records || 0; totalWarn += r.warnings || 0;
+    mappedAcc += (r.mappedPct || 0) * (r.records || 0);
+    const isFile = !String(r.file).includes('.');  // db target has a dotted schema.table
+    const dlBtn = (String(r.file).endsWith('.csv') || String(r.file).endsWith('.jsonl'))
+      ? `<a class="btn btn-ghost btn-sm" href="/api/download/${runId}/${app}">&#8595; Download</a>`
+      : `<span class="rc">database table</span>`;
+    const d = document.createElement('div'); d.className = 'file';
+    d.innerHTML = `<span class="ic">&#128196;</span>
+      <div style="flex:1"><div class="fn mono">${r.file}</div>
+      <div class="fm">${Number(r.records).toLocaleString()} records · ${r.mappedPct}% mapped · ${r.warnings} warning(s) · ${app}</div></div>
+      ${dlBtn}`;
+    fl.appendChild(d);
+  });
+  const mappedPct = totalRec ? Math.round(mappedAcc/totalRec) : 100;
+  document.getElementById('rTotal').textContent = Number(totalRec).toLocaleString();
+  document.getElementById('rWarn').textContent = totalWarn;
+  const ring = document.getElementById('ring'), rv = document.getElementById('ringv');
+  ring.style.setProperty('--p', mappedPct); rv.textContent = mappedPct + '%';
 }
 
 /* ---------- init ---------- */
-renderTables();
-go(1);
+renderConns();
+onSourceChange();
+go(0);
 </script>
 </body>
 </html>
