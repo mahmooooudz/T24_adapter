@@ -340,6 +340,7 @@ def _run_worker(run: RunState, payload: dict) -> None:
     for t in tables:
         run.apps[t] = {"total": 0, "processed": 0, "status": "pending"}
 
+    pipeline = None
     try:
         if (payload.get("source") == "database"
                 and "postgre" not in (payload.get("dbType") or "postgresql").lower()):
@@ -405,6 +406,8 @@ def _run_worker(run: RunState, payload: dict) -> None:
         run.log("err", run.error)
         run.emit("error", message=run.error)
     finally:
+        if pipeline is not None:
+            pipeline.close()          # release the shared read connection
         _THREAD_RUN.pop(threading.get_ident(), None)
 
 

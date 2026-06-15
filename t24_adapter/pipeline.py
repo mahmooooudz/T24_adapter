@@ -45,7 +45,7 @@ from .metadata_registry import T24MetadataRegistry
 from .models import NormalizedField
 from .normalizer import T24Normalizer
 from .reader import T24StreamingDataReader
-from .db_reader import T24DatabaseDataReader, T24DatabaseMetadataReader
+from .db_reader import T24DatabaseDataReader, T24DatabaseMetadataReader, _connect_from_env
 from .validation import T24PackageValidator
 
 logger = logging.getLogger("t24-adapter.pipeline")
@@ -68,21 +68,22 @@ class T24MetadataOrchestrator:
     def __init__(
         self,
         config: T24PipelineConfig,
-        discovery: T24PackageDiscovery
+        discovery: T24PackageDiscovery,
+        connection=None,
     ):
         self.config = config
         self.discovery = discovery
         self.registry = T24MetadataRegistry()
         # Optional database-backed STANDARD.SELECTION source.
-        self.metadata_reader = self._make_db_reader(config, config.db_metadata_table)
+        self.metadata_reader = self._make_db_reader(config, config.db_metadata_table, connection)
         # Optional database-backed LOCAL.REF and CUSTOMIZATION sources. These
         # tables share STANDARD_SELECTION's layout (one row per app, keyed by
         # the app name, metadata XML in the same key/xml columns).
-        self.local_ref_reader = self._make_db_reader(config, config.db_local_ref_table)
-        self.customization_reader = self._make_db_reader(config, config.db_customization_table)
+        self.local_ref_reader = self._make_db_reader(config, config.db_local_ref_table, connection)
+        self.customization_reader = self._make_db_reader(config, config.db_customization_table, connection)
 
     @staticmethod
-    def _make_db_reader(config: T24PipelineConfig, table):
+    def _make_db_reader(config: T24PipelineConfig, table, connection=None):
         """Build a metadata reader for `table`, or None if not in DB mode / unset."""
         if config.source == "database" and table:
             return T24DatabaseMetadataReader(
@@ -90,6 +91,7 @@ class T24MetadataOrchestrator:
                 table=table,
                 key_column=config.db_metadata_key_column,
                 xml_column=config.db_metadata_xml_column,
+                connection=connection,
             )
         return None
 
@@ -277,6 +279,10 @@ class T24GenericPipeline:
         self.validator = T24PackageValidator(config)
         self.discovery = T24PackageDiscovery(config)
         self.reader = T24StreamingDataReader()
+        # One shared read connection for the whole run, opened lazily. All DB
+        # reads (discovery, metadata, streaming) reuse it instead of opening a
+        # new connection per step; closed by close()/the context manager.
+        self._read_conn = None
         self.db_reader = (
             T24DatabaseDataReader(
                 schema=config.db_schema,
@@ -286,6 +292,27 @@ class T24GenericPipeline:
             if config.source == "database"
             else None
         )
+
+    def _read_connection(self):
+        """Lazily open (once) and return the shared read connection, or None
+        when not reading from a database."""
+        if self.config.source != "database":
+            return None
+        if self._read_conn is None or getattr(self._read_conn, "closed", 0):
+            self._read_conn = _connect_from_env()
+        return self._read_conn
+
+    def close(self) -> None:
+        """Close the shared read connection. Safe to call multiple times."""
+        if self._read_conn is not None and not getattr(self._read_conn, "closed", 1):
+            self._read_conn.close()
+        self._read_conn = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def run(self) -> Iterator[NormalizedField]:
         """
@@ -305,6 +332,15 @@ class T24GenericPipeline:
         RuntimeError if package validation fails
         FileNotFoundError if required metadata is missing
         """
+
+        # Open (once) the shared read connection and inject it into the data
+        # reader so discovery + streaming reuse it. The metadata orchestrator
+        # below receives the same connection. Owned by this pipeline; closed by
+        # close()/the context manager, so it persists across re-runs (the
+        # writers call run() more than once).
+        read_conn = self._read_connection()
+        if self.db_reader is not None:
+            self.db_reader._conn = read_conn
 
         # === STAGE 1: Package Validation ===
         logger.info("=== STAGE 1: Package Validation ===")
@@ -370,7 +406,8 @@ class T24GenericPipeline:
         # === STAGE 3-5: Per-Application Processing ===
         metadata_orchestrator = T24MetadataOrchestrator(
             config=self.config,
-            discovery=self.discovery
+            discovery=self.discovery,
+            connection=read_conn,
         )
 
         for app_name in applications:

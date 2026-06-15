@@ -90,19 +90,26 @@ class T24DatabaseDataReader:
         record_column: str = "xmlRecord",
         record_id_column: str = "recordId",
         batch_size: int = 1000,
+        connection=None,
     ):
         self.schema = schema
         self.record_column = record_column
         self.record_id_column = record_id_column
         self.batch_size = batch_size
+        # Optional shared connection. When set, this reader reuses it for every
+        # operation and never closes it (the owner — the pipeline — does). When
+        # None, each operation opens and closes its own short-lived connection.
+        self._conn = connection
 
     # ------------------------------------------------------------------ #
     # Connection
     # ------------------------------------------------------------------ #
 
-    def _connect(self):
-        """Open a connection using environment variables (see _connect_from_env)."""
-        return _connect_from_env()
+    def _acquire(self):
+        """Return (connection, owns_it). owns_it=False for a shared connection."""
+        if self._conn is not None:
+            return self._conn, False
+        return _connect_from_env(), True
 
     def discover_tables(self, exclude=(), exclude_suffixes=()) -> list:
         """
@@ -117,7 +124,7 @@ class T24DatabaseDataReader:
         """
         exclude_set = set(exclude or ())
         suffixes = tuple(exclude_suffixes or ())
-        conn = _connect_from_env()
+        conn, owns = self._acquire()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
@@ -128,7 +135,10 @@ class T24DatabaseDataReader:
                 )
                 names = [r[0] for r in cursor.fetchall()]
         finally:
-            conn.close()
+            if owns:
+                conn.close()
+            else:
+                conn.rollback()  # release the read txn on the shared connection
         return [
             n for n in names
             if n not in exclude_set and not (suffixes and n.endswith(suffixes))
@@ -165,7 +175,7 @@ class T24DatabaseDataReader:
             f"(id {self.record_id_column}, column {self.record_column})"
         )
 
-        conn = self._connect()
+        conn, owns = self._acquire()
         record_count = 0
         try:
             # Named cursor => server-side streaming cursor.
@@ -199,7 +209,12 @@ class T24DatabaseDataReader:
                             record_count += 1
                             yield (rid, element)
         finally:
-            conn.close()
+            if owns:
+                conn.close()
+            else:
+                # Shared connection: close the server-side cursor's txn so the
+                # next metadata/stream query on this connection starts clean.
+                conn.rollback()
 
         logger.info(f"Finished streaming. Total records: {record_count}")
 
@@ -240,11 +255,15 @@ class T24DatabaseMetadataReader:
         table: str,
         key_column: str = "appName",
         xml_column: str = "xmlRecord",
+        connection=None,
     ):
         self.schema = schema
         self.table = table
         self.key_column = key_column
         self.xml_column = xml_column
+        # Optional shared connection (see T24DatabaseDataReader). When set it is
+        # reused and never closed here; the owner closes it.
+        self._conn = connection
 
     def fetch_xml(self, app_name: str):
         """
@@ -255,7 +274,10 @@ class T24DatabaseMetadataReader:
         """
         from psycopg2 import sql
 
-        conn = _connect_from_env()
+        if self._conn is not None:
+            conn, owns = self._conn, False
+        else:
+            conn, owns = _connect_from_env(), True
         try:
             with conn.cursor() as cursor:
                 query = sql.SQL(
@@ -273,9 +295,14 @@ class T24DatabaseMetadataReader:
                 f"Could not read metadata table "
                 f"{self.schema}.{self.table} ({type(exc).__name__}): {exc}"
             )
+            if not owns:
+                conn.rollback()  # clear the aborted txn on the shared connection
             return None
         finally:
-            conn.close()
+            if owns:
+                conn.close()
+            else:
+                conn.rollback()
 
         if row and row[0]:
             logger.info(

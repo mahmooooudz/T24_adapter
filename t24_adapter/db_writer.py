@@ -92,7 +92,10 @@ class WideDatabaseWriter:
         Pivot every application and upsert each into its own result table.
 
         The source is read exactly twice, regardless of how many applications
-        there are: once to discover the wide schema, once to write. Pass 2
+        there are: once to discover the wide schema (column set + per-field max
+        occurrences, which determines the exact bare-vs-indexed shape without
+        ever losing a value), once to write. Both passes share the pipeline's
+        single read connection, so the cost is I/O, not connection setup. Pass 2
         streams every app's rows in a single traversal and dispatches each to
         its own per-app transaction (committed at the app boundary).
 
@@ -103,10 +106,11 @@ class WideDatabaseWriter:
         schemas = self._pivot.discover_schema(pipeline.run())          # pass 1
         if not schemas:
             logger.warning("No records discovered; no result tables written.")
+            pipeline.close()
             return {}
 
         results: Dict[str, tuple] = {}
-        conn = _connect_from_env()
+        conn = _connect_from_env()      # dedicated WRITE connection
         sink = None
         try:
             # pass 2 — single traversal of the whole source, app-grouped.
@@ -123,6 +127,8 @@ class WideDatabaseWriter:
             raise
         finally:
             conn.close()
+            # Release the shared READ connection owned by the pipeline.
+            pipeline.close()
         return results
 
     def _build_upsert_sql(self, cursor, table: str, columns: List[str]) -> str:
@@ -176,17 +182,21 @@ class WideDatabaseWriter:
             (self.schema, table),
         )
         existing = {r[0] for r in cursor.fetchall()}
-        for c in columns:
-            if c not in existing:
-                cursor.execute(
-                    sql.SQL("ALTER TABLE {}.{} ADD COLUMN {} text").format(
-                        sql.Identifier(self.schema), sql.Identifier(table),
-                        sql.Identifier(c),
-                    )
-                )
-                logger.info(f"Added column {c!r} to {self.schema}.{table}")
-
+        self._add_columns(cursor, table, [c for c in columns if c not in existing])
         self._ensure_unique(cursor, table)
+
+    def _add_columns(self, cursor, table: str, columns: List[str]) -> None:
+        """Add the given TEXT columns to an existing table (idempotent)."""
+        from psycopg2 import sql
+
+        for c in columns:
+            cursor.execute(
+                sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} text").format(
+                    sql.Identifier(self.schema), sql.Identifier(table),
+                    sql.Identifier(c),
+                )
+            )
+            logger.info(f"Added column {c!r} to {self.schema}.{table}")
 
     def _ensure_unique(self, cursor, table: str) -> None:
         """Ensure a UNIQUE constraint exists on the key column (needed for upsert)."""
