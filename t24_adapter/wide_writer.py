@@ -39,8 +39,20 @@ Two-pass streaming, constant memory:
             time.
 
 Both passes call pipeline.run() (the pipeline is a re-runnable generator),
-so the source XML is parsed twice. This trades ~2x CPU for bounded memory,
-which is the safe choice for large T24 extracts.
+so the source XML is parsed twice — but both passes reuse the pipeline's single
+read connection, so the cost is I/O, not connection setup. The discovery pass
+is what makes the exact bare-vs-indexed shape possible WITHOUT ever losing a
+value: a field becomes NAME only if it never repeats, and NAME_1..N sized to
+its true maximum. (A single-pass scheme cannot know that maximum up front, and
+deriving width from metadata cardinality risks dropping values when a field is
+mislabelled SINGLE — so the two-pass discovery is the correct, lossless choice.)
+
+Why not pandas
+--------------
+The engine is deliberately pure-Python and streaming (one record in flight),
+so memory is constant regardless of row count and it scales to very large
+extracts. pandas would load the data into an in-memory frame and defeat that,
+so it is reserved strictly for the optional, bounded `to_dataframe` preview.
 """
 
 from __future__ import annotations
