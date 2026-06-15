@@ -87,23 +87,29 @@ class WideDatabaseWriter:
         self.filters_active = filters_active
         self._pivot = WidePivotWriter()
 
-    def write(self, pipeline) -> Dict[str, tuple]:
+    def write(self, pipeline, schemas=None) -> Dict[str, tuple]:
         """
         Pivot every application and upsert each into its own result table.
 
-        The source is read exactly twice, regardless of how many applications
-        there are: once to discover the wide schema (column set + per-field max
-        occurrences, which determines the exact bare-vs-indexed shape without
-        ever losing a value), once to write. Both passes share the pipeline's
-        single read connection, so the cost is I/O, not connection setup. Pass 2
-        streams every app's rows in a single traversal and dispatches each to
-        its own per-app transaction (committed at the app boundary).
+        The source is read twice: once to discover the wide schema (column set +
+        per-field max occurrences, which determines the exact bare-vs-indexed
+        shape without ever losing a value), once to write. Both passes share the
+        pipeline's single read connection, so the cost is I/O, not connection
+        setup. Pass 2 streams every app's rows in a single traversal.
+
+        Parameters
+        ----------
+        schemas : optional pre-discovered {app_name: _AppSchema}. When provided
+            (e.g. the web console already ran a discovery pass to compute live
+            stats), the discovery pass here is SKIPPED — the whole job is one
+            discovery + one write instead of two discoveries + one write.
 
         Returns
         -------
         Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
-        schemas = self._pivot.discover_schema(pipeline.run())          # pass 1
+        if schemas is None:
+            schemas = self._pivot.discover_schema(pipeline.run())      # pass 1
         if not schemas:
             logger.warning("No records discovered; no result tables written.")
             pipeline.close()

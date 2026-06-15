@@ -385,8 +385,10 @@ def _run_worker(run: RunState, payload: dict) -> None:
         run.emit("schema", apps={t: run.apps[t]["total"] for t in tables})
 
         # --- Pass 2: write output, emitting per-row progress. ---
+        # Reuse the schema discovered above so the DB writer does not re-scan
+        # the source (one discovery + one write, not two discoveries + a write).
         if fmt == "db":
-            _write_database(run, cfg, pipeline, tables, stats)
+            _write_database(run, cfg, pipeline, tables, stats, schemas)
         else:
             _write_files(run, writer, pipeline, schemas, tables, fmt, stats)
 
@@ -467,7 +469,7 @@ def _write_files(run, writer, pipeline, schemas, tables, fmt, stats):
                  total=run.apps[app_name]["total"], status="done")
 
 
-def _write_database(run, cfg, pipeline, tables, stats):
+def _write_database(run, cfg, pipeline, tables, stats, schemas=None):
     db_writer = WideDatabaseWriter(
         schema=cfg.db_schema,
         suffix=cfg.db_output_suffix,
@@ -481,7 +483,7 @@ def _write_database(run, cfg, pipeline, tables, stats):
         run.apps[t]["status"] = "running"
         run.emit("progress", app=t, processed=0, total=run.apps[t]["total"], status="running")
 
-    written = db_writer.write(pipeline)
+    written = db_writer.write(pipeline, schemas=schemas)
     for app_name, (table, upserted, deleted, cols) in written.items():
         a = app_name.upper()
         st = stats.get(a, {})
