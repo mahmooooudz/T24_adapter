@@ -495,11 +495,18 @@ function srcPayload(){
   };
 }
 
-/* ---------- saved connections (browser localStorage only) ---------- */
-const CONN_KEY = 't24_connections';
+/* ---------- saved connections (persisted server-side via /api/connections) ----------
+   Held in memory after hydrating from the server on load, so the synchronous
+   call sites below stay simple. Mutations go through the API, so they survive
+   terminating/restarting the server (the terminal). */
+let CONNS = [];
 let selectedConnId = null;
-function loadConns(){ try { return JSON.parse(localStorage.getItem(CONN_KEY)) || []; } catch(e){ return []; } }
-function storeConns(a){ localStorage.setItem(CONN_KEY, JSON.stringify(a)); }
+function loadConns(){ return CONNS; }
+function hydrateConns(){
+  return fetch('/api/connections').then(r => r.json())
+    .then(d => { CONNS = (d && d.connections) || []; renderConns(); })
+    .catch(() => { CONNS = []; renderConns(); });
+}
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m])); }
 
 function renderConns(){
@@ -590,19 +597,32 @@ function saveConnection(){
     remember,
   };
   if (remember) conn.password = document.getElementById('cPass').value;
-  const arr = loadConns(); const i = arr.findIndex(x => x.id === conn.id);
-  if (i >= 0) arr[i] = conn; else arr.push(conn);
-  storeConns(arr);
-  selectedConnId = conn.id;
-  st.style.color = 'var(--green)';
-  st.textContent = '✓ Saved' + (remember ? '' : ' (password not stored)');
-  document.getElementById('connEditorTitle').textContent = 'Connection · ' + conn.name;
-  renderConns();
+  st.style.color = 'var(--text-3)'; st.textContent = 'Saving…';
+  api('/api/connections', conn).then(d => {
+    if (!d || !d.ok){
+      st.style.color = 'var(--red)';
+      st.textContent = '✕ ' + ((d && d.message) || 'Could not save connection.');
+      return;
+    }
+    CONNS = d.connections || CONNS;
+    selectedConnId = conn.id;
+    st.style.color = 'var(--green)';
+    st.textContent = '✓ Saved' + (remember ? '' : ' (password not stored)');
+    document.getElementById('connEditorTitle').textContent = 'Connection · ' + conn.name;
+    renderConns();
+  }).catch(() => {
+    st.style.color = 'var(--red)'; st.textContent = '✕ Could not reach the server to save.';
+  });
 }
 function deleteConn(id){
-  storeConns(loadConns().filter(x => x.id !== id));
-  if (selectedConnId === id) selectedConnId = null;
-  renderConns();
+  fetch('/api/connections/' + encodeURIComponent(id), {method:'DELETE'})
+    .then(r => r.json())
+    .then(d => {
+      CONNS = (d && d.connections) || CONNS.filter(x => x.id !== id);
+      if (selectedConnId === id) selectedConnId = null;
+      renderConns();
+    })
+    .catch(() => { /* leave UI as-is on network error */ });
 }
 
 /* ---------- navigation ---------- */
@@ -829,7 +849,7 @@ function showResults(results){
 }
 
 /* ---------- init ---------- */
-renderConns();
+hydrateConns();   // load saved connections from the server, then render
 onSourceChange();
 go(0);
 </script>

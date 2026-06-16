@@ -38,6 +38,7 @@ honestly (HTTP 501 / a clear message) rather than mocked:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
@@ -76,6 +77,82 @@ CONSOLE_HTML = "t24_flattening_console.html"
 
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
 logger = logging.getLogger("t24-web")
+
+
+# ====================================================================== #
+# Saved connections — persisted to a local file
+# ====================================================================== #
+# Saved connections used to live only in the browser's localStorage, which is
+# scoped per origin (including the port). The console's free-port fallback can
+# bind a different port each launch, so that store appeared to vanish on every
+# restart. Persisting them server-side to a local JSON file makes "Save
+# connection" durable across restarts, independent of browser/port.
+#
+# A password is written ONLY when the connection opted into "remember"; without
+# it the password is never stored on disk. The file is git-ignored.
+
+CONNECTIONS_FILE = BASE_DIR / "connections.json"
+_CONN_LOCK = threading.Lock()
+
+
+def _load_connections() -> List[dict]:
+    """Return the saved connections list (empty if the file is absent/corrupt)."""
+    try:
+        with CONNECTIONS_FILE.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _save_connections(conns: List[dict]) -> None:
+    """Write the connections list atomically (temp file + replace)."""
+    tmp = CONNECTIONS_FILE.with_name(CONNECTIONS_FILE.name + ".tmp")
+    with tmp.open("w", encoding="utf-8") as fh:
+        json.dump(conns, fh, indent=2)
+    tmp.replace(CONNECTIONS_FILE)
+
+
+@app.route("/api/connections", methods=["GET"])
+def list_connections():
+    """Return all saved connections."""
+    with _CONN_LOCK:
+        return jsonify(ok=True, connections=_load_connections())
+
+
+@app.route("/api/connections", methods=["POST"])
+def upsert_connection():
+    """Create or update one saved connection (keyed by its id)."""
+    conn = request.get_json(force=True, silent=True) or {}
+    name = str(conn.get("name") or "").strip()
+    conn_id = str(conn.get("id") or "").strip()
+    if not name:
+        return jsonify(ok=False, message="Connection name is required."), 400
+    if not conn_id:
+        return jsonify(ok=False, message="Connection id is required."), 400
+    conn["name"] = name
+    conn["id"] = conn_id
+    # Never persist a password unless the connection explicitly opted in.
+    if not conn.get("remember"):
+        conn.pop("password", None)
+    with _CONN_LOCK:
+        conns = _load_connections()
+        idx = next((i for i, c in enumerate(conns) if c.get("id") == conn_id), None)
+        if idx is None:
+            conns.append(conn)
+        else:
+            conns[idx] = conn
+        _save_connections(conns)
+    return jsonify(ok=True, connections=conns)
+
+
+@app.route("/api/connections/<conn_id>", methods=["DELETE"])
+def delete_connection(conn_id):
+    """Delete one saved connection by id."""
+    with _CONN_LOCK:
+        conns = [c for c in _load_connections() if c.get("id") != conn_id]
+        _save_connections(conns)
+    return jsonify(ok=True, connections=conns)
 
 
 # ====================================================================== #
@@ -593,6 +670,14 @@ def _pick_port(preferred: int) -> int:
 
     if is_free(preferred):
         return preferred
+    # Deterministic fallback: scan a fixed range upward from the preferred port
+    # and take the first free one. This keeps the origin (host:port) stable
+    # across restarts — important because saved-connection state and bookmarks
+    # are origin-scoped. (An OS-assigned random port would change every launch.)
+    for p in range(preferred + 1, preferred + 51):
+        if is_free(p):
+            return p
+    # Last resort (50 consecutive ports busy): let the OS assign one.
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]

@@ -19,3 +19,7 @@ pipeline.log
 .vscode/
 .claude/
 .env
+
+# Saved console connections (may contain DB credentials)
+connections.json
+connections.json.tmp
