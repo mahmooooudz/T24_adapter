@@ -36,6 +36,15 @@ def test_sweep_blocked_on_empty_run():
     assert _w()._should_sweep("t", set()) is False
 
 
-def test_streaming_flushes_per_row_batching_uses_batch_size():
-    assert _w(write_mode="streaming", batch_size=500).batch_size == 1
+def test_both_modes_bulk_upsert_never_per_row():
+    # Regression guard: "streaming" must NOT collapse to one row per round-trip
+    # (the old batch=1 behaviour was ~one network RTT per row on a remote DB).
+    assert _w(write_mode="streaming", batch_size=500).batch_size == 500
     assert _w(write_mode="batching", batch_size=250).batch_size == 250
+    # Streaming with no explicit size falls back to a sane bulk default, not 1.
+    assert _w(write_mode="streaming", batch_size=0).batch_size > 1
+
+
+def test_batch_size_floor_is_one():
+    # Defensive: a negative/zero batching size never produces a non-positive flush.
+    assert _w(write_mode="batching", batch_size=0).batch_size == 1

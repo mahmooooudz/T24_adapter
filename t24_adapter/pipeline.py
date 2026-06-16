@@ -42,6 +42,7 @@ from .metadata_loaders import (
     StandardSelectionLoader,
 )
 from .metadata_registry import T24MetadataRegistry
+from .metrics import metrics
 from .models import NormalizedField
 from .normalizer import T24Normalizer
 from .reader import T24StreamingDataReader
@@ -283,6 +284,11 @@ class T24GenericPipeline:
         # reads (discovery, metadata, streaming) reuse it instead of opening a
         # new connection per step; closed by close()/the context manager.
         self._read_conn = None
+        # Per-application metadata registry cache. The wide writer calls run()
+        # twice (schema discovery + write); metadata is static within a run, so
+        # the second pass reuses the first pass's registry instead of re-fetching
+        # STANDARD.SELECTION/LOCAL.REF/CUSTOMIZATION (3 round-trips per app).
+        self._registry_cache: dict = {}
         self.db_reader = (
             T24DatabaseDataReader(
                 schema=config.db_schema,
@@ -344,7 +350,8 @@ class T24GenericPipeline:
 
         # === STAGE 1: Package Validation ===
         logger.info("=== STAGE 1: Package Validation ===")
-        validation_result = self.validator.validate_package()
+        with metrics.span("validate"):
+            validation_result = self.validator.validate_package()
 
         if not validation_result.is_valid:
             for error in validation_result.errors:
@@ -362,21 +369,23 @@ class T24GenericPipeline:
         if self.config.source == "database":
             # Dynamic: every base table in the schema (except the metadata
             # table) is an application, keyed by its own name. No hardcoding.
-            applications = self.db_reader.discover_tables(
-                exclude={
-                    self.config.db_metadata_table,
-                    self.config.db_local_ref_table,
-                    self.config.db_customization_table,
-                },
-                exclude_suffixes=(self.config.db_output_suffix,),
-            )
+            with metrics.span("discover_apps"):
+                applications = self.db_reader.discover_tables(
+                    exclude={
+                        self.config.db_metadata_table,
+                        self.config.db_local_ref_table,
+                        self.config.db_customization_table,
+                    },
+                    exclude_suffixes=(self.config.db_output_suffix,),
+                )
             if not applications:
                 raise RuntimeError(
                     f"No data tables found in schema '{self.config.db_schema}' "
                     f"(excluding metadata table '{self.config.db_metadata_table}')."
                 )
         else:
-            applications = self.discovery.discover_applications()
+            with metrics.span("discover_apps"):
+                applications = self.discovery.discover_applications()
             if not applications:
                 raise RuntimeError(
                     "No T24 XML data files found in the data directory. "
@@ -437,9 +446,15 @@ class T24GenericPipeline:
                 and self.config.record_id_from_db_column
             )
 
-            # === STAGE 3: Load Metadata ===
+            # === STAGE 3: Load Metadata (cached across passes) ===
             logger.info(f"--- Stage 3: Loading Metadata for {app_name} ---")
-            registry = metadata_orchestrator.load_for_application(app_name)
+            registry = self._registry_cache.get(app_name.upper())
+            if registry is None:
+                with metrics.span("metadata_fetch"):
+                    registry = metadata_orchestrator.load_for_application(app_name)
+                self._registry_cache[app_name.upper()] = registry
+            else:
+                logger.info(f"[{app_name}] metadata reused from cache (no re-fetch).")
 
             # === STAGE 4 & 5: Stream + Normalize ===
             logger.info(f"--- Stage 4+5: Streaming and Normalizing {app_name} ---")

@@ -24,9 +24,16 @@ Per application, per run:
    New keys are inserted, existing keys are updated in place. Re-runs are
    idempotent; changed values are reflected. Nothing is truncated.
 
-Write modes (same upsert, different flush size):
-- "streaming" (default): upsert each row as produced — low, constant memory.
-- "batching": accumulate db_batch_size rows, then bulk-upsert.
+Write modes (both bulk-upsert; differ only in flush size):
+- "streaming" (default): bounded-memory bulk upsert — flush every db_batch_size
+  rows so only one batch is ever in flight. Memory is constant regardless of
+  total row count.
+- "batching": identical mechanism; an explicit alias for callers that want to
+  state "throughput-oriented" intent.
+
+Both flush each batch in a SINGLE bulk statement (one network round-trip per
+batch via execute_values page_size), never one round-trip per row — the latter
+is pathological against a remote database (one ~RTT per row).
 
 Full sync (optional, safety-gated)
 ----------------------------------
@@ -45,9 +52,16 @@ import logging
 from typing import Dict, List
 
 from .db_reader import _connect_from_env
+from .metrics import metrics
 from .wide_writer import WidePivotWriter
 
 logger = logging.getLogger("t24-adapter.db-writer")
+
+# Default flush size for "streaming" mode when no batch size is supplied.
+# Streaming means "bounded memory", NOT "one row per round-trip"; a batch of a
+# few hundred small rows is negligible memory but turns N network round-trips
+# into N/flush. The floor is always >= 1.
+_STREAMING_FLUSH_ROWS = 500
 
 
 class WideDatabaseWriter:
@@ -79,7 +93,14 @@ class WideDatabaseWriter:
         self.schema = schema
         self.suffix = suffix
         self.write_mode = write_mode
-        self.batch_size = batch_size if write_mode == "batching" else 1
+        # Both modes bulk-upsert in batches. "streaming" used to mean batch=1
+        # (one network round-trip per row) — pathological on a remote DB — so it
+        # now flushes in bounded bulk like "batching". The flush size is always
+        # >= 1; streaming falls back to a sane default when none is given.
+        if write_mode == "batching":
+            self.batch_size = max(1, int(batch_size))
+        else:  # "streaming" (default) and any unknown mode
+            self.batch_size = max(1, int(batch_size)) if batch_size else _STREAMING_FLUSH_ROWS
         self.key_column = key_column
         self.full_sync = full_sync
         # When the (future) Filters feature narrows a run, this must be True so
@@ -109,7 +130,8 @@ class WideDatabaseWriter:
         Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
         if schemas is None:
-            schemas = self._pivot.discover_schema(pipeline.run())      # pass 1
+            with metrics.span("pass1_discover_schema"):
+                schemas = self._pivot.discover_schema(pipeline.run())  # pass 1
         if not schemas:
             logger.warning("No records discovered; no result tables written.")
             pipeline.close()
@@ -120,14 +142,15 @@ class WideDatabaseWriter:
         sink = None
         try:
             # pass 2 — single traversal of the whole source, app-grouped.
-            for app_name, row in self._pivot.iter_all_wide_rows(pipeline.run(), schemas):
-                if sink is None or sink.app_name != app_name:
-                    if sink is not None:
-                        results[sink.app_name] = sink.finalize()
-                    sink = _AppSink(self, conn, app_name, schemas[app_name])
-                sink.add(row)
-            if sink is not None:
-                results[sink.app_name] = sink.finalize()
+            with metrics.span("pass2_write"):
+                for app_name, row in self._pivot.iter_all_wide_rows(pipeline.run(), schemas):
+                    if sink is None or sink.app_name != app_name:
+                        if sink is not None:
+                            results[sink.app_name] = sink.finalize()
+                        sink = _AppSink(self, conn, app_name, schemas[app_name])
+                    sink.add(row)
+                if sink is not None:
+                    results[sink.app_name] = sink.finalize()
         except Exception:
             conn.rollback()
             raise
@@ -302,7 +325,8 @@ class _AppSink:
         self.table = f"{app_name}{writer.suffix}"
         self.columns = schema.columns
         self.cursor = conn.cursor()
-        writer._ensure_table(self.cursor, self.table, self.columns)
+        with metrics.span("ddl"):
+            writer._ensure_table(self.cursor, self.table, self.columns)
         self._upsert_sql = writer._build_upsert_sql(self.cursor, self.table, self.columns)
         self._batch: List[tuple] = []
         self.seen: set = set()
@@ -319,14 +343,25 @@ class _AppSink:
     def _flush(self) -> None:
         if not self._batch:
             return
+        from time import perf_counter
+
         from psycopg2.extras import execute_values
-        execute_values(self.cursor, self._upsert_sql, self._batch)
+        start = perf_counter()
+        # page_size = batch size => the whole batch goes in ONE round-trip
+        # (execute_values' default page_size of 100 would split a larger batch).
+        execute_values(
+            self.cursor, self._upsert_sql, self._batch,
+            page_size=max(100, len(self._batch)),
+        )
+        metrics.add("db_upsert", perf_counter() - start)
+        metrics.incr("db_roundtrips")
         self.upserted += len(self._batch)
         self._batch = []
 
     def finalize(self) -> tuple:
         self._flush()
-        deleted = self.writer._sweep(self.cursor, self.table, self.seen)
+        with metrics.span("db_sweep"):
+            deleted = self.writer._sweep(self.cursor, self.table, self.seen)
         self.cursor.close()
         self.conn.commit()
         logger.info(

@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from t24_adapter import T24GenericPipeline, WideDatabaseWriter, load_env
+from t24_adapter.metrics import metrics
 from settings import build_config
 
 # Load database credentials from .env into the environment (no-op if absent).
@@ -42,6 +43,9 @@ def main():
     # 1. Configuration (all settings live in settings.py)
     config = build_config()
 
+    # Start a fresh latency-measurement run (per-step timings logged at the end).
+    metrics.reset()
+
     # 2. Pipeline
     pipeline = T24GenericPipeline(config)
 
@@ -63,7 +67,11 @@ def main():
 
     logger.info(f"Writing wide output to the database (mode={config.db_write_mode}, "
                 f"full_sync={config.db_full_sync})...")
-    written = writer.write(pipeline)
+    try:
+        written = writer.write(pipeline)
+    finally:
+        # Always emit the latency breakdown, even if the run failed partway.
+        metrics.report(logger)
     for app_name, (table, upserted, deleted, cols) in written.items():
         logger.info(
             f"  {app_name} -> {config.db_schema}.{table}  "

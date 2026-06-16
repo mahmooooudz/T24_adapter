@@ -38,6 +38,7 @@ import os
 import xml.etree.ElementTree as ET
 from typing import Iterator
 
+from .metrics import metrics
 from .xml_utils import XmlUtils
 
 logger = logging.getLogger("t24-adapter.db-reader")
@@ -278,6 +279,7 @@ class T24DatabaseMetadataReader:
             conn, owns = self._conn, False
         else:
             conn, owns = _connect_from_env(), True
+        metrics.incr("metadata_roundtrips")
         try:
             with conn.cursor() as cursor:
                 query = sql.SQL(

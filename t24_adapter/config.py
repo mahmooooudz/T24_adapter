@@ -155,11 +155,13 @@ class T24PipelineConfig:
     # ------------------------------------------------------------------ #
     # Output write behaviour (database sink)
     # ------------------------------------------------------------------ #
-    # How rows are written to the result tables:
-    #   "streaming" -> upsert each row as it is produced (low memory, default)
-    #   "batching"  -> upsert in bulk chunks of db_batch_size (higher throughput)
-    # Both modes UPSERT (INSERT ... ON CONFLICT DO UPDATE) on db_key_column,
-    # so re-runs update changed rows in place. No truncation.
+    # How rows are written to the result tables. BOTH modes bulk-upsert in
+    # chunks of db_batch_size (one network round-trip per chunk) — neither
+    # writes a row at a time, which is pathological against a remote DB.
+    #   "streaming" -> bounded-memory bulk upsert (only one chunk in flight)
+    #   "batching"  -> identical mechanism; explicit "throughput" alias
+    # Both UPSERT (INSERT ... ON CONFLICT DO UPDATE) on db_key_column, so
+    # re-runs update changed rows in place. No truncation.
     db_write_mode: str = "streaming"
     db_batch_size: int = 500
 
