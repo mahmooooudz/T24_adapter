@@ -636,8 +636,10 @@ def _write_database_parallel(run, cfg, tables, totals, stats):
     """Parallel DB sink via T24WorkerPool. Each worker:
       - registers its thread in _THREAD_RUN so its adapter log lines flow
         into THIS run's SSE stream (otherwise they'd silently disappear);
-      - shares the same progress+stats wrapper (RunMetrics + the wrapper's
-        accumulators are thread-safe);
+      - gets its OWN _streaming_progress_wrapper instance (the wrapper's
+        boundary-detection state — last_key / processed / next_emit — is
+        per-stream; sharing one wrapper across threads breaks boundary
+        detection when their fields interleave and inflates record counts);
       - returns its app's (table, upserted, deleted, cols) tuple, which we
         feed back through the same _record_db_result path as sequential.
     """
@@ -654,10 +656,11 @@ def _write_database_parallel(run, cfg, tables, totals, stats):
 
     set_worker_thread_hooks(_register, _deregister)
 
-    wrap = _streaming_progress_wrapper(run, totals, stats)
-
     def factory(worker_cfg):
         w = _make_db_writer(worker_cfg)
+        # Each worker gets its OWN wrapper closure — sharing breaks because the
+        # wrapper's last_key flickers across apps when threads interleave.
+        wrap = _streaming_progress_wrapper(run, totals, stats)
         # Monkey-attach the wrapper so each worker's write() uses it. Equivalent
         # to passing rows_wrapper= at every call site without changing the pool
         # API or threading state through additional arguments.
