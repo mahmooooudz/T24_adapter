@@ -376,6 +376,15 @@
         <div class="card" id="dbsec" style="display:none">
           <div class="clabel">Target database</div>
           <div class="info" style="margin-bottom:0">Each table is written to <b style="margin:0 4px">&lt;schema&gt;.&lt;APP&gt;_wide</b> in the connection schema, via UPSERT (insert new / update changed).</div>
+          <div class="toggle-row" style="margin-top:10px">
+            <span>Parallel workers <span style="font-size:11px;color:var(--text-3)">· per-application thread pool</span></span>
+            <select id="optMaxWorkers" style="width:90px;padding:4px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text)">
+              <option value="1" selected>1 (sequential)</option>
+              <option value="2">2</option>
+              <option value="4">4</option>
+              <option value="8">8</option>
+            </select>
+          </div>
         </div>
         <div class="card">
           <div class="clabel">Position resolution</div>
@@ -723,6 +732,7 @@ function runOptions(){
   return {
     includeUnmapped: document.getElementById('optIncludeUnmapped').checked,
     degradeUnknown: document.getElementById('optDegrade').checked,
+    maxWorkers: parseInt(document.getElementById('optMaxWorkers').value, 10) || 1,
   };
 }
 

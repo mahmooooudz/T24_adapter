@@ -270,6 +270,12 @@ def _build_config(payload: dict) -> T24PipelineConfig:
         cfg.db_customization_table = payload.get("customizationTable", "CUSTOMIZATION")
         # A narrowed (subset) run must never trigger the full-sync delete sweep.
         cfg.db_filters_active = bool(tables)
+        # Parallelism from the UI dropdown (default 1 = sequential).
+        try:
+            mw = int(options.get("maxWorkers", 1))
+            cfg.db_max_workers = mw if mw >= 1 else 1
+        except (TypeError, ValueError):
+            cfg.db_max_workers = 1
     return cfg
 
 
@@ -427,47 +433,28 @@ def _run_worker(run: RunState, payload: dict) -> None:
 
         cfg = _build_config(payload)
         pipeline = T24GenericPipeline(cfg)
-        writer = WidePivotWriter()
 
         run.log("ok", f"Starting pipeline · {len(tables)} table(s) · format={fmt}")
 
-        # --- Pass 1: discover schema while counting REAL totals + stats. ---
+        # Stats accumulator — populated DURING the single-pass work by the
+        # progress wrapper, so neither path needs a separate discovery scan.
         stats = {t: {"records": 0, "fields": 0, "mapped": 0, "warnings": 0} for t in tables}
-        last_key = {"app": None, "rid": object()}
 
-        def counting(rows):
-            for f in rows:
-                if run.stop.is_set():
-                    raise _Stopped()
-                a = f.app_name.upper()
-                s = stats.setdefault(
-                    a, {"records": 0, "fields": 0, "mapped": 0, "warnings": 0})
-                if a != last_key["app"] or f.record_id != last_key["rid"]:
-                    s["records"] += 1
-                    last_key["app"] = a
-                    last_key["rid"] = f.record_id
-                s["fields"] += 1
-                if f.is_mapped:
-                    s["mapped"] += 1
-                if f.warnings:
-                    s["warnings"] += len(f.warnings)
-                yield f
-
-        schemas = writer.discover_schema(counting(pipeline.run()))
+        # Pre-compute totals (DB: COUNT(*); files: count <row> per XML) so the
+        # progress bar has a denominator before any streaming starts.
+        totals = _resolve_totals(cfg, tables, payload.get("source"))
         for t in tables:
-            total = stats.get(t, {}).get("records", 0)
-            run.apps.setdefault(t, {})["total"] = total
+            run.apps[t]["total"] = totals.get(t, 0)
             run.apps[t]["processed"] = 0
             run.apps[t]["status"] = "pending"
         run.emit("schema", apps={t: run.apps[t]["total"] for t in tables})
 
-        # --- Pass 2: write output, emitting per-row progress. ---
-        # Reuse the schema discovered above so the DB writer does not re-scan
-        # the source (one discovery + one write, not two discoveries + a write).
+        # Both sinks (DB / files) now flow through the SAME single-pass shape:
+        # one source read, streaming progress emitted by _streaming_progress_wrapper.
         if fmt == "db":
-            _write_database(run, cfg, pipeline, tables, stats, schemas)
+            _write_database_streaming(run, cfg, pipeline, tables, totals, stats)
         else:
-            _write_files(run, writer, pipeline, schemas, tables, fmt, stats)
+            _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt)
 
         run.status = "done"
         total_records = sum(stats.get(t, {}).get("records", 0) for t in tables)
@@ -490,46 +477,263 @@ def _run_worker(run: RunState, payload: dict) -> None:
         _THREAD_RUN.pop(threading.get_ident(), None)
 
 
-def _write_files(run, writer, pipeline, schemas, tables, fmt, stats):
+def _resolve_totals(cfg, tables, source):
+    """Pre-compute per-app record totals for the progress-bar denominator.
+
+    - DB source: one COUNT(*) per table (exact, ~70 ms each on the remote DB).
+    - Files source: count <row> elements per XML file (fast local scan).
+
+    Returned dict is {app_name: int}. Missing entries (e.g. a file that
+    doesn't exist) default to 0; the progress wrapper handles a 0 denominator.
+    """
+    totals = {}
+    if source == "database":
+        from t24_adapter.db_reader import _connect_from_env
+        from psycopg2 import sql
+        conn = _connect_from_env()
+        try:
+            with conn.cursor() as cur:
+                for t in tables:
+                    cur.execute(
+                        sql.SQL("SELECT count(*) FROM {}.{}").format(
+                            sql.Identifier(cfg.db_schema), sql.Identifier(t),
+                        )
+                    )
+                    totals[t] = int(cur.fetchone()[0])
+        finally:
+            conn.close()
+    else:
+        reader = T24StreamingDataReader()
+        for t in tables:
+            f = PACKAGE_ROOT / "data" / f"{t}.xml"
+            totals[t] = reader.count_records(f) if f.exists() else 0
+    return totals
+
+
+def _streaming_progress_wrapper(run, totals, stats):
+    """Wraps the pipeline.run() field stream for the single-pass DB write.
+
+    For every NormalizedField passing through:
+    - accumulates stats[app] (records / fields / mapped / warnings)
+    - on a record boundary, bumps the processed counter and (throttled to
+      ~1% of total) emits an SSE 'progress' event so the UI fills the bar
+      live, not at the end
+    - honours run.stop.is_set() so the user's "stop" button works
+    """
+    last_key = {"app": None, "rid": object()}
+    processed = {t: 0 for t in totals}
+    # Track the last emit's processed-count per app so we only push when
+    # the % bar has moved at least one unit.
+    next_emit = {t: 1 for t in totals}
+
+    def step_for(app):
+        # Throttle progress events: ~one per 1% of the table, min 50 rows,
+        # so very small tables still tick visibly and big ones don't flood SSE.
+        total = totals.get(app, 0)
+        return max(50, total // 100) if total else 50
+
+    def wrap(rows):
+        nonlocal processed, next_emit
+        for f in rows:
+            if run.stop.is_set():
+                raise _Stopped()
+            a = f.app_name.upper()
+            s = stats.setdefault(
+                a, {"records": 0, "fields": 0, "mapped": 0, "warnings": 0})
+            # Detect record boundary (app or record_id changed).
+            if a != last_key["app"] or f.record_id != last_key["rid"]:
+                s["records"] += 1
+                processed[a] = processed.get(a, 0) + 1
+                last_key["app"] = a
+                last_key["rid"] = f.record_id
+                # Mark this app's row as running on its first observed record.
+                if run.apps.get(a, {}).get("status") != "running":
+                    run.apps.setdefault(a, {}).update(status="running")
+                    run.emit("progress", app=a, processed=0,
+                             total=totals.get(a, 0), status="running")
+                # Throttled progress emit.
+                if processed[a] >= next_emit.get(a, 1):
+                    run.apps[a]["processed"] = processed[a]
+                    run.emit("progress", app=a, processed=processed[a],
+                             total=totals.get(a, 0), status="running")
+                    next_emit[a] = processed[a] + step_for(a)
+            s["fields"] += 1
+            if f.is_mapped:
+                s["mapped"] += 1
+            if f.warnings:
+                s["warnings"] += len(f.warnings)
+            yield f
+
+        # Final flush: make sure each touched app shows its true final count.
+        for a, n in processed.items():
+            if n and run.apps.get(a, {}).get("processed", 0) != n:
+                run.apps[a]["processed"] = n
+                run.emit("progress", app=a, processed=n,
+                         total=totals.get(a, 0), status="running")
+    return wrap
+
+
+def _make_db_writer(cfg):
+    """Construct a WideDatabaseWriter from a config. Shared by the sequential
+    DB write and the per-worker factory used by T24WorkerPool."""
+    return WideDatabaseWriter(
+        schema=cfg.db_schema,
+        suffix=cfg.db_output_suffix,
+        write_mode=cfg.db_write_mode,
+        batch_size=cfg.db_batch_size,
+        key_column=cfg.db_key_column,
+        full_sync=cfg.db_full_sync,
+        filters_active=cfg.db_filters_active,
+        single_pass=cfg.db_single_pass,
+        single_pass_max_rows=cfg.db_single_pass_max_rows,
+    )
+
+
+def _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats):
+    """Update RunState + emit the final 'done' progress for one app."""
+    a = app_name.upper()
+    st = stats.get(a, {})
+    mapped_pct = round(100 * st.get("mapped", 0) / st["fields"]) if st.get("fields") else 100
+    run.apps.setdefault(a, {"total": upserted})
+    run.apps[a].update(processed=upserted, status="done")
+    run.results[a] = {
+        "file": f"{cfg.db_schema}.{table}",
+        "records": upserted,
+        "deleted": deleted,
+        "mappedPct": mapped_pct,
+        "warnings": st.get("warnings", 0),
+        "columns": cols,
+    }
+    run.log("ok", f"{app_name} → {cfg.db_schema}.{table} "
+                  f"({upserted} upserted, {deleted} deleted, {cols} cols)")
+    run.emit("progress", app=a, processed=upserted,
+             total=run.apps[a].get("total", upserted), status="done")
+
+
+def _write_database_streaming(run, cfg, pipeline, tables, totals, stats):
+    """DB sink, single source read, progress events flowing live as records
+    pass through the normalize→buffer phase.
+
+    Dispatch:
+    - cfg.db_max_workers <= 1 — one pipeline + writer, sequential (today's path).
+    - cfg.db_max_workers >  1 — T24WorkerPool fans applications out across
+      worker threads (each with its own connections); the SSE log handler
+      already routes per-thread via _THREAD_RUN, so each worker registers
+      itself on enter via set_worker_thread_hooks.
+    """
+    if cfg.db_max_workers > 1 and len(tables) > 1:
+        return _write_database_parallel(run, cfg, tables, totals, stats)
+
+    # Sequential path — same code shape as before, simplified.
+    db_writer = _make_db_writer(cfg)
+    wrap = _streaming_progress_wrapper(run, totals, stats)
+    written = db_writer.write(pipeline, rows_wrapper=wrap)
+    for app_name, (table, upserted, deleted, cols) in written.items():
+        _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
+
+
+def _write_database_parallel(run, cfg, tables, totals, stats):
+    """Parallel DB sink via T24WorkerPool. Each worker:
+      - registers its thread in _THREAD_RUN so its adapter log lines flow
+        into THIS run's SSE stream (otherwise they'd silently disappear);
+      - shares the same progress+stats wrapper (RunMetrics + the wrapper's
+        accumulators are thread-safe);
+      - returns its app's (table, upserted, deleted, cols) tuple, which we
+        feed back through the same _record_db_result path as sequential.
+    """
+    from t24_adapter.parallel import T24WorkerPool, set_worker_thread_hooks
+
+    run_id = run.id
+
+    def _register():
+        # Route this worker thread's adapter log lines to the active run.
+        _THREAD_RUN[threading.get_ident()] = run_id
+
+    def _deregister():
+        _THREAD_RUN.pop(threading.get_ident(), None)
+
+    set_worker_thread_hooks(_register, _deregister)
+
+    wrap = _streaming_progress_wrapper(run, totals, stats)
+
+    def factory(worker_cfg):
+        w = _make_db_writer(worker_cfg)
+        # Monkey-attach the wrapper so each worker's write() uses it. Equivalent
+        # to passing rows_wrapper= at every call site without changing the pool
+        # API or threading state through additional arguments.
+        original_write = w.write
+        def write_with_wrapper(pipe, schemas=None):
+            return original_write(pipe, schemas=schemas, rows_wrapper=wrap)
+        w.write = write_with_wrapper
+        return w
+
+    pool = T24WorkerPool(cfg, factory, max_workers=cfg.db_max_workers)
+    try:
+        outcomes = pool.run(tables)
+    finally:
+        # Detach hooks so a later sequential run isn't surprised by them.
+        set_worker_thread_hooks(None, None)
+
+    failed = []
+    for app_name, o in outcomes.items():
+        if o["status"] == "ok" and o["result"]:
+            table, upserted, deleted, cols = o["result"]
+            _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
+        else:
+            failed.append((app_name, o["status"], o.get("error")))
+            run.log("err", f"{app_name} → {o['status']}: {o.get('error')}")
+    if failed:
+        raise RuntimeError(f"{len(failed)} of {len(outcomes)} application(s) failed: {failed}")
+
+
+def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
+    """Files sink, single-pass: stream + normalize + buffer ONCE (progress
+    emitted live by the same wrapper DB mode uses), then write each app's
+    buffered rows to its own CSV/JSONL.
+
+    Same shape as _write_database_streaming, just a different sink at the end.
+    """
     import csv
     import json
 
+    pivot = WidePivotWriter()
+    wrap = _streaming_progress_wrapper(run, totals, stats)
+    rows = wrap(pipeline.run())
+    schemas, buffers, overflow = pivot.stream_buffer_and_schema(
+        rows, max_buffer_rows=cfg.db_single_pass_max_rows,
+    )
+
     run.output_dir.mkdir(parents=True, exist_ok=True)
+    ext = "csv" if fmt == "csv" else "jsonl"
+
     for app_name in tables:
         schema = schemas.get(app_name)
-        run.apps[app_name]["status"] = "running"
-        run.emit("progress", app=app_name, processed=0,
-                 total=run.apps[app_name]["total"], status="running")
-        if schema is None:
+        if schema is None or app_name in overflow:
             run.apps[app_name]["status"] = "done"
-            run.log("warn", f"{app_name}: no records found.")
+            note = "no records found" if schema is None else (
+                "table exceeded single-pass buffer cap; re-run with a larger "
+                "db_single_pass_max_rows or smaller table"
+            )
+            run.log("warn", f"{app_name}: {note}")
             run.emit("progress", app=app_name, processed=0, total=0, status="done")
             continue
 
-        ext = "csv" if fmt == "csv" else "jsonl"
         out_path = run.output_dir / f"{app_name}_wide.{ext}"
-        processed = 0
-        total = run.apps[app_name]["total"] or 1
-
         with out_path.open("w", newline="", encoding="utf-8") as fh:
             if fmt == "csv":
                 w = csv.DictWriter(fh, fieldnames=schema.columns)
                 w.writeheader()
-            for row in writer.iter_wide_rows(pipeline.run(), schema, app_name):
+            for rid, values in buffers.get(app_name, []):
                 if run.stop.is_set():
                     raise _Stopped()
+                row = pivot.wide_row_from_buffer(rid, values, schema, app_name)
                 if fmt == "csv":
                     w.writerow(row)
                 else:
                     rec = {k: (v if v != "" else None) for k, v in row.items()}
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-                processed += 1
-                # Emit progress every ~1% (or every row for small sets).
-                if processed % max(1, total // 100) == 0 or processed == total:
-                    run.apps[app_name]["processed"] = processed
-                    run.emit("progress", app=app_name, processed=processed,
-                             total=run.apps[app_name]["total"], status="running")
 
+        processed = len(buffers.get(app_name, []))
         st = stats.get(app_name, {})
         mapped_pct = round(100 * st.get("mapped", 0) / st["fields"]) if st.get("fields") else 100
         run.apps[app_name].update(processed=processed, status="done")
@@ -544,41 +748,9 @@ def _write_files(run, writer, pipeline, schemas, tables, fmt, stats):
                       f"({processed:,} rows, {mapped_pct}% mapped)")
         run.emit("progress", app=app_name, processed=processed,
                  total=run.apps[app_name]["total"], status="done")
+    pipeline.close()
 
 
-def _write_database(run, cfg, pipeline, tables, stats, schemas=None):
-    db_writer = WideDatabaseWriter(
-        schema=cfg.db_schema,
-        suffix=cfg.db_output_suffix,
-        write_mode=cfg.db_write_mode,
-        batch_size=cfg.db_batch_size,
-        key_column=cfg.db_key_column,
-        full_sync=cfg.db_full_sync,
-        filters_active=cfg.db_filters_active,
-    )
-    for t in tables:
-        run.apps[t]["status"] = "running"
-        run.emit("progress", app=t, processed=0, total=run.apps[t]["total"], status="running")
-
-    written = db_writer.write(pipeline, schemas=schemas)
-    for app_name, (table, upserted, deleted, cols) in written.items():
-        a = app_name.upper()
-        st = stats.get(a, {})
-        mapped_pct = round(100 * st.get("mapped", 0) / st["fields"]) if st.get("fields") else 100
-        run.apps.setdefault(a, {"total": upserted})
-        run.apps[a].update(processed=upserted, status="done")
-        run.results[a] = {
-            "file": f"{cfg.db_schema}.{table}",
-            "records": upserted,
-            "deleted": deleted,
-            "mappedPct": mapped_pct,
-            "warnings": st.get("warnings", 0),
-            "columns": cols,
-        }
-        run.log("ok", f"{app_name} → {cfg.db_schema}.{table} "
-                      f"({upserted} upserted, {deleted} deleted, {cols} cols)")
-        run.emit("progress", app=a, processed=upserted,
-                 total=run.apps[a]["total"], status="done")
 
 
 class _Stopped(Exception):
