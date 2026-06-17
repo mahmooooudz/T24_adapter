@@ -89,10 +89,17 @@ class WideDatabaseWriter:
         key_column: str = "recordId",
         full_sync: bool = False,
         filters_active: bool = False,
+        single_pass: bool = True,
+        single_pass_max_rows: int = 200_000,
     ):
         self.schema = schema
         self.suffix = suffix
         self.write_mode = write_mode
+        # Single-pass: read+parse+normalize once, buffering per app, instead of
+        # the two-pass discover-then-write. Bounded by single_pass_max_rows per
+        # app (above it, that app falls back to two-pass streaming).
+        self.single_pass = single_pass
+        self.single_pass_max_rows = single_pass_max_rows
         # Both modes bulk-upsert in batches. "streaming" used to mean batch=1
         # (one network round-trip per row) — pathological on a remote DB — so it
         # now flushes in bounded bulk like "batching". The flush size is always
@@ -129,6 +136,74 @@ class WideDatabaseWriter:
         -------
         Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
+        # Single-pass is used only when this writer discovers the schema itself.
+        # When the caller pre-discovered schemas (e.g. the web console), keep the
+        # two-pass write that consumes those schemas.
+        if schemas is None and self.single_pass:
+            return self._write_single_pass(pipeline)
+        return self._write_two_pass(pipeline, schemas)
+
+    def _write_single_pass(self, pipeline) -> Dict[str, tuple]:
+        """
+        One traversal: buffer per app while discovering the shape, then bulk
+        write from the buffer — no second read. Apps over single_pass_max_rows
+        fall back to a two-pass re-stream (memory-bounded).
+        """
+        with metrics.span("pass_single"):
+            schemas, buffers, overflow = self._pivot.stream_buffer_and_schema(
+                pipeline.run(), max_buffer_rows=self.single_pass_max_rows
+            )
+        if not schemas:
+            logger.warning("No records discovered; no result tables written.")
+            pipeline.close()
+            return {}
+
+        results: Dict[str, tuple] = {}
+        conn = _connect_from_env()      # dedicated WRITE connection
+        try:
+            with metrics.span("pass2_write"):
+                # Buffered apps: write directly, no re-read.
+                for app_name, schema in schemas.items():
+                    if app_name in overflow:
+                        continue
+                    sink = _AppSink(self, conn, app_name, schema)
+                    for rid, values in buffers.get(app_name, []):
+                        sink.add(self._pivot.wide_row_from_buffer(rid, values, schema, app_name))
+                    results[app_name] = sink.finalize()
+                # Overflow apps (too large to buffer): re-stream just those.
+                if overflow:
+                    results.update(self._write_overflow(pipeline, schemas, overflow, conn))
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+            pipeline.close()
+        return results
+
+    def _write_overflow(self, pipeline, schemas, overflow, conn) -> Dict[str, tuple]:
+        """Two-pass write for the (rare) apps that exceeded the buffer cap.
+        Narrows the re-stream to only the overflow apps via include_applications."""
+        results: Dict[str, tuple] = {}
+        prev_include = pipeline.config.include_applications
+        sink = None
+        try:
+            pipeline.config.include_applications = tuple(sorted(overflow))
+            for app_name, row in self._pivot.iter_all_wide_rows(pipeline.run(), schemas):
+                if sink is None or sink.app_name != app_name:
+                    if sink is not None:
+                        results[sink.app_name] = sink.finalize()
+                    sink = _AppSink(self, conn, app_name, schemas[app_name])
+                sink.add(row)
+            if sink is not None:
+                results[sink.app_name] = sink.finalize()
+        finally:
+            pipeline.config.include_applications = prev_include
+        return results
+
+    def _write_two_pass(self, pipeline, schemas=None) -> Dict[str, tuple]:
+        """Original two-pass write: discover the schema (unless given), then a
+        single traversal of the whole source, writing app by app."""
         if schemas is None:
             with metrics.span("pass1_discover_schema"):
                 schemas = self._pivot.discover_schema(pipeline.run())  # pass 1
@@ -181,15 +256,24 @@ class WideDatabaseWriter:
     # ------------------------------------------------------------------ #
 
     def _ensure_table(self, cursor, table: str, columns: List[str]) -> None:
-        """Create the table if missing; add new columns; ensure the key is UNIQUE."""
+        """Create the table if missing; add new columns; ensure the key is UNIQUE.
+
+        One introspection query: information_schema.columns returns the table's
+        columns (empty set => the table does not exist), so the separate
+        "does the table exist?" round-trip is no longer needed.
+        """
         from psycopg2 import sql
 
         cursor.execute(
-            "SELECT 1 FROM information_schema.tables "
+            "SELECT column_name FROM information_schema.columns "
             "WHERE table_schema = %s AND table_name = %s",
             (self.schema, table),
         )
-        if cursor.fetchone() is None:
+        existing = {r[0] for r in cursor.fetchall()}
+
+        if not existing:
+            # No columns reported => table does not exist yet. Create it with the
+            # UNIQUE key in the same statement (so no follow-up _ensure_unique).
             col_defs = sql.SQL(", ").join(
                 sql.SQL("{} text").format(sql.Identifier(c)) for c in columns
             )
@@ -205,12 +289,6 @@ class WideDatabaseWriter:
             return
 
         # Exists: add any columns present now but missing in the table.
-        cursor.execute(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = %s AND table_name = %s",
-            (self.schema, table),
-        )
-        existing = {r[0] for r in cursor.fetchall()}
         self._add_columns(cursor, table, [c for c in columns if c not in existing])
         self._ensure_unique(cursor, table)
 

@@ -35,9 +35,9 @@ from __future__ import annotations
 
 import logging
 import os
-import xml.etree.ElementTree as ET
 from typing import Iterator
 
+from ._xml_backend import XMLParseError, fromstring, log_backend_once
 from .metrics import metrics
 from .xml_utils import XmlUtils
 
@@ -92,11 +92,18 @@ class T24DatabaseDataReader:
         record_id_column: str = "recordId",
         batch_size: int = 1000,
         connection=None,
+        buffered_read_max_rows: int = 0,
     ):
         self.schema = schema
         self.record_column = record_column
         self.record_id_column = record_id_column
         self.batch_size = batch_size
+        # When > 0, tables estimated at or below this many rows are read with a
+        # PLAIN client-side cursor (one round-trip, no server-cursor protocol
+        # overhead) instead of a server-side streaming cursor — ~2x faster for
+        # tables that fit in memory. Larger tables still stream server-side so
+        # memory stays constant. 0 = always server-side (original behaviour).
+        self.buffered_read_max_rows = buffered_read_max_rows
         # Optional shared connection. When set, this reader reuses it for every
         # operation and never closes it (the owner — the pipeline — does). When
         # None, each operation opens and closes its own short-lived connection.
@@ -149,73 +156,102 @@ class T24DatabaseDataReader:
     # Streaming
     # ------------------------------------------------------------------ #
 
+    def _estimate_rows(self, conn, table: str) -> int:
+        """Cheap, instant row-count estimate via pg_class.reltuples (no scan).
+        Returns -1 when unknown (e.g. never analyzed, or table missing)."""
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "SELECT reltuples::bigint FROM pg_class WHERE oid = %s::regclass",
+                    (f'"{self.schema}"."{table}"',),
+                )
+                row = cursor.fetchone()
+            if row and row[0] is not None and row[0] >= 0:
+                return int(row[0])
+        except Exception:
+            if self._conn is not None:
+                self._conn.rollback()  # clear the aborted txn on the shared conn
+        return -1
+
+    def _emit_rows(self, cursor, table: str):
+        """Yield (record_id, <row> element) for each record from `cursor`.
+        Returns the record count (consumed via `yield from`)."""
+        count = 0
+        for record_id, xml_value in cursor:
+            if not xml_value or not str(xml_value).strip():
+                logger.warning(
+                    f"Empty {self.record_column} for recordId="
+                    f"{record_id!r} in {self.schema}.{table}; skipping."
+                )
+                continue
+            root = self._parse(xml_value)
+            if root is None:
+                continue
+            rid = None if record_id is None else str(record_id)
+            for element in root.iter():
+                if XmlUtils.strip_namespace(element.tag).lower() == "row":
+                    count += 1
+                    yield (rid, element)
+        return count
+
     def stream_records(self, table: str) -> Iterator[tuple]:
         """
         Stream records from a T24-shaped database table.
 
-        Parameters
-        ----------
-        table : table name within the configured schema (e.g. "FBANK_Account")
+        Yields (record_id, ET.Element) tuples — the recordId column paired with
+        each <row> element inside that record's XML.
 
-        Yields
-        ------
-        (record_id, ET.Element) tuples — the value of the recordId column
-        paired with each <row> element found inside that record's XML.
+        Read strategy (chosen per table):
+        - Tables estimated at/under `buffered_read_max_rows` are read with a
+          PLAIN client-side cursor: one round-trip, no server-cursor protocol
+          overhead (~2x faster). The result fits in memory by construction.
+        - Larger tables (or when the estimate is unknown / the feature is off)
+          use a server-side streaming cursor so memory stays constant.
 
-        Notes
-        -----
-        - Identifiers are safely quoted, so mixed-case names like
-          "FBANK_Account", "xmlRecord" and "recordId" are handled correctly.
-        - A server-side cursor with itersize keeps memory constant.
-        - The connection is always closed when iteration finishes.
+        Identifiers are safely quoted; the connection's read txn is released
+        when iteration finishes.
         """
         from psycopg2 import sql
 
-        logger.info(
-            f"Streaming records from database: {self.schema}.{table} "
-            f"(id {self.record_id_column}, column {self.record_column})"
+        log_backend_once()
+        conn, owns = self._acquire()
+        query = sql.SQL("SELECT {id_col}, {col} FROM {schema}.{table}").format(
+            id_col=sql.Identifier(self.record_id_column),
+            col=sql.Identifier(self.record_column),
+            schema=sql.Identifier(self.schema),
+            table=sql.Identifier(table),
         )
 
-        conn, owns = self._acquire()
+        use_plain = False
+        if self.buffered_read_max_rows and self.buffered_read_max_rows > 0:
+            est = self._estimate_rows(conn, table)
+            use_plain = 0 <= est <= self.buffered_read_max_rows
+            logger.info(
+                f"Streaming {self.schema}.{table} (~{est} rows est.): "
+                f"{'plain buffered read' if use_plain else 'server-side streaming'}"
+            )
+        else:
+            logger.info(f"Streaming records from database: {self.schema}.{table}")
+
         record_count = 0
         try:
-            # Named cursor => server-side streaming cursor.
-            with conn.cursor(name="t24_record_stream") as cursor:
-                cursor.itersize = self.batch_size
-                query = sql.SQL(
-                    "SELECT {id_col}, {col} FROM {schema}.{table}"
-                ).format(
-                    id_col=sql.Identifier(self.record_id_column),
-                    col=sql.Identifier(self.record_column),
-                    schema=sql.Identifier(self.schema),
-                    table=sql.Identifier(table),
-                )
-                cursor.execute(query)
-
-                for record_id, xml_value in cursor:
-                    if not xml_value or not str(xml_value).strip():
-                        logger.warning(
-                            f"Empty {self.record_column} for recordId="
-                            f"{record_id!r} in {self.schema}.{table}; skipping."
-                        )
-                        continue
-
-                    root = self._parse(xml_value)
-                    if root is None:
-                        continue
-
-                    rid = None if record_id is None else str(record_id)
-                    for element in root.iter():
-                        if XmlUtils.strip_namespace(element.tag).lower() == "row":
-                            record_count += 1
-                            yield (rid, element)
+            if use_plain:
+                # Plain client-side cursor: single round-trip, bounded by the
+                # size gate above.
+                with conn.cursor() as cursor:
+                    cursor.execute(query)
+                    record_count = yield from self._emit_rows(cursor, table)
+            else:
+                # Server-side (named) streaming cursor: constant memory.
+                with conn.cursor(name="t24_record_stream") as cursor:
+                    cursor.itersize = self.batch_size
+                    cursor.execute(query)
+                    record_count = yield from self._emit_rows(cursor, table)
         finally:
             if owns:
                 conn.close()
             else:
-                # Shared connection: close the server-side cursor's txn so the
-                # next metadata/stream query on this connection starts clean.
-                conn.rollback()
+                conn.rollback()  # release the read txn on the shared connection
 
         logger.info(f"Finished streaming. Total records: {record_count}")
 
@@ -229,8 +265,8 @@ class T24DatabaseDataReader:
         "Unicode strings with encoding declaration are not supported").
         """
         try:
-            return ET.fromstring(str(xml_value).encode("utf-8"))
-        except ET.ParseError as exc:
+            return fromstring(str(xml_value).encode("utf-8"))
+        except XMLParseError as exc:
             logger.error(f"Malformed XML in record column; skipping row: {exc}")
             return None
 
@@ -266,12 +302,14 @@ class T24DatabaseMetadataReader:
         # reused and never closed here; the owner closes it.
         self._conn = connection
 
-    def fetch_xml(self, app_name: str):
+    def fetch_all(self) -> dict:
         """
-        Return the STANDARD.SELECTION XML string for app_name, or None if
-        there is no matching row. If the metadata table does not exist yet
-        (migration not run), logs a warning and returns None so the caller
-        can fall back to file-based metadata.
+        Return {key: xml} for EVERY row in the metadata table in a SINGLE query.
+
+        Metadata tables hold one small row per application, so one round-trip
+        fetches them all (vs. one query per application). Returns an empty dict
+        (and warns) if the table is missing/unreadable, so the caller falls back
+        to file-based metadata.
         """
         from psycopg2 import sql
 
@@ -282,34 +320,31 @@ class T24DatabaseMetadataReader:
         metrics.incr("metadata_roundtrips")
         try:
             with conn.cursor() as cursor:
-                query = sql.SQL(
-                    "SELECT {xml} FROM {schema}.{table} WHERE {key} = %s"
-                ).format(
+                query = sql.SQL("SELECT {key}, {xml} FROM {schema}.{table}").format(
+                    key=sql.Identifier(self.key_column),
                     xml=sql.Identifier(self.xml_column),
                     schema=sql.Identifier(self.schema),
                     table=sql.Identifier(self.table),
-                    key=sql.Identifier(self.key_column),
                 )
-                cursor.execute(query, (app_name,))
-                row = cursor.fetchone()
+                cursor.execute(query)
+                rows = cursor.fetchall()
         except Exception as exc:  # e.g. UndefinedTable before migration is run
             logger.warning(
                 f"Could not read metadata table "
                 f"{self.schema}.{self.table} ({type(exc).__name__}): {exc}"
             )
             if not owns:
-                conn.rollback()  # clear the aborted txn on the shared connection
-            return None
+                conn.rollback()
+            return {}
         finally:
             if owns:
                 conn.close()
             else:
                 conn.rollback()
 
-        if row and row[0]:
-            logger.info(
-                f"Loaded STANDARD.SELECTION for '{app_name}' from "
-                f"{self.schema}.{self.table}."
-            )
-            return row[0]
-        return None
+        result = {r[0]: r[1] for r in rows if r and r[1]}
+        logger.info(
+            f"Prefetched {len(result)} metadata row(s) from "
+            f"{self.schema}.{self.table} in one query."
+        )
+        return result

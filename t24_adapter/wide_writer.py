@@ -380,6 +380,109 @@ class WidePivotWriter:
             yield (cur_app, cur_row)
 
     # ------------------------------------------------------------------ #
+    # Single pass: schema + buffered data in ONE traversal (Lever 1)
+    # ------------------------------------------------------------------ #
+
+    def stream_buffer_and_schema(self, rows, max_buffer_rows=None):
+        """
+        ONE pass over the long stream that BOTH discovers the per-app wide
+        schema AND buffers each app's records compactly — so the source is read,
+        parsed and normalized only once (vs. the two-pass discover-then-write).
+
+        Records arrive app-grouped and record-contiguous, so only ONE app's
+        buffer is held at a time (it is handed back per app via the return).
+
+        Parameters
+        ----------
+        rows            : iterator of NormalizedField (a single pipeline.run()).
+        max_buffer_rows : per-app cap on buffered records. When an app exceeds
+                          it, the app is marked "overflow": its schema is still
+                          completed (cheap), but its buffered data is dropped so
+                          memory stays bounded — the caller re-streams just that
+                          app via the two-pass path. None = unbounded.
+
+        Returns
+        -------
+        (schemas, buffers, overflow)
+            schemas  : {app_name: finalized _AppSchema}
+            buffers  : {app_name: [(record_id, {position: [values]}), ...]}
+                       (absent/empty for overflow apps)
+            overflow : set of app names that exceeded max_buffer_rows
+        """
+        schemas: Dict[str, _AppSchema] = {}
+        buffers: Dict[str, List[Tuple[Optional[str], Dict[str, List]]]] = {}
+        overflow: set = set()
+
+        cur_app: object = _NO_RECORD
+        cur_record_id: object = _NO_RECORD
+        cur_counts: Dict[str, int] = {}
+        cur_names: Dict[str, str] = {}
+        cur_values: Dict[str, List] = {}
+
+        def flush() -> None:
+            if cur_app is _NO_RECORD:
+                return
+            schema = schemas.setdefault(cur_app, _AppSchema(cur_app))
+            schema.observe_record(cur_counts, cur_names)
+            if cur_app in overflow:
+                return  # schema kept up to date; data dropped (re-streamed later)
+            buf = buffers.setdefault(cur_app, [])
+            buf.append((cur_record_id, cur_values))
+            if max_buffer_rows is not None and len(buf) > max_buffer_rows:
+                overflow.add(cur_app)
+                buffers[cur_app] = []  # free the partial buffer; bound memory
+
+        for row in rows:
+            if (row.app_name != cur_app) or (row.record_id != cur_record_id):
+                flush()
+                cur_app = row.app_name
+                cur_record_id = row.record_id
+                cur_counts = {}
+                cur_names = {}
+                cur_values = {}
+
+            pos = row.resolved_position
+            cur_counts[pos] = cur_counts.get(pos, 0) + 1
+            cur_names.setdefault(pos, row.field_name)
+            cur_values.setdefault(pos, []).append(row.value)
+
+        flush()
+
+        for schema in schemas.values():
+            schema.finalize()
+            logger.info(
+                f"[{schema.app_name}] wide schema: {len(schema.columns)} columns "
+                f"({len(schema.columns) - len(LEADING_COLUMNS)} field columns)"
+            )
+        for app in sorted(buffers):
+            if app not in overflow:
+                logger.debug(f"[{app}] buffered {len(buffers[app])} record(s) for single-pass write")
+        if overflow:
+            logger.warning(
+                f"Apps exceeding the single-pass buffer cap ({max_buffer_rows}) "
+                f"will be re-streamed (two-pass): {sorted(overflow)}"
+            )
+
+        return schemas, buffers, overflow
+
+    def wide_row_from_buffer(self, record_id, values, schema, app_name) -> Dict[str, str]:
+        """Build one wide-row dict from a buffered record's {position: [values]}."""
+        row = {col: "" for col in schema.columns}
+        row["recordId"] = record_id if record_id is not None else ""
+        row["app_name"] = app_name
+        for position, vals in values.items():
+            headers = schema.headers_for(position)
+            for slot, v in enumerate(vals):
+                if slot < len(headers):
+                    row[headers[slot]] = v if v is not None else ""
+                else:
+                    logger.warning(
+                        f"[{app_name}] record '{record_id}' position {position} "
+                        f"exceeded discovered max ({len(headers)}); extra value dropped."
+                    )
+        return row
+
+    # ------------------------------------------------------------------ #
     # Public writers
     # ------------------------------------------------------------------ #
 

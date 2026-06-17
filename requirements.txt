@@ -3,6 +3,7 @@
 # The pieces below are needed for the database source/sink and the preview.
 
 psycopg2-binary>=2.9    # PostgreSQL driver (database source + sink)
+lxml>=5.0               # optional: faster XML parsing (auto-used if installed)
 pandas>=2.0             # optional: DataFrame preview / analysis
 tabulate>=0.9           # optional: pretty console preview tables
 Flask>=3.0              # web console backend (app.py)

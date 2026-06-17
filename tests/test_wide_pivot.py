@@ -91,3 +91,73 @@ def test_iter_all_wide_rows_matches_per_app_single_pass():
     assert all_rows == per_app
     assert [r["recordId"] for r in all_rows["A"]] == ["a1", "a2"]
     assert [r["recordId"] for r in all_rows["B"]] == ["b1"]
+
+
+# ---------------------------------------------------------------------------
+# Lever 1 — single-pass buffered pivot must equal the two-pass output exactly.
+# ---------------------------------------------------------------------------
+
+def _single_pass_rows(fields, max_buffer_rows=None):
+    """Run the single-pass buffered pivot and return {app: [wide_row, ...]}."""
+    wp = WidePivotWriter()
+    schemas, buffers, overflow = wp.stream_buffer_and_schema(
+        FakePipeline(fields).run(), max_buffer_rows=max_buffer_rows
+    )
+    out = {}
+    for app, schema in schemas.items():
+        if app in overflow:
+            continue
+        out[app] = [
+            wp.wide_row_from_buffer(rid, vals, schema, app)
+            for rid, vals in buffers.get(app, [])
+        ]
+    return schemas, out, overflow
+
+
+def test_single_pass_equals_two_pass_multi_app():
+    # Mixed: repeating field, schema growth (pad), multiple apps, special chars.
+    fields = [
+        nf("A", "a1", "1", "KEY", "a1"), nf("A", "a1", "9", "OFFICER", "x", mv="1"),
+        nf("A", "a2", "1", "KEY", "a2"),
+        nf("A", "a2", "9", "OFFICER", "p", mv="1"),
+        nf("A", "a2", "9", "OFFICER", "q", mv="2"),
+        nf("A", "a2", "9", "OFFICER", "r", mv="3"),
+        nf("B", "b1", "1", "KEY", "b1"), nf("B", "b1", "2", "TITLE", 'Café, "Jr" | x'),
+    ]
+    wp = WidePivotWriter()
+    schemas_2p = wp.discover_schema(FakePipeline(fields).run())
+    two_pass = {}
+    for app, row in wp.iter_all_wide_rows(FakePipeline(fields).run(), schemas_2p):
+        two_pass.setdefault(app, []).append(row)
+
+    schemas_1p, single_pass, overflow = _single_pass_rows(fields)
+
+    assert not overflow
+    # Same columns per app...
+    for app in two_pass:
+        assert schemas_1p[app].columns == schemas_2p[app].columns
+    # ...and byte-identical wide rows.
+    assert single_pass == two_pass
+
+
+def test_single_pass_none_value_becomes_blank():
+    fields = [nf("A", "a1", "1", "KEY", "a1"), nf("A", "a1", "2", "OPT", None)]
+    _, rows, _ = _single_pass_rows(fields)
+    assert rows["A"][0]["OPT"] == ""
+
+
+def test_single_pass_overflow_keeps_schema_drops_buffer():
+    # Cap of 1 row: app A has 2 records -> overflow. Schema must still be complete
+    # (so the caller can re-stream), but A's data buffer is emptied (bounded mem).
+    fields = [
+        nf("A", "a1", "1", "KEY", "a1"), nf("A", "a1", "9", "OFFICER", "x", mv="1"),
+        nf("A", "a2", "1", "KEY", "a2"),
+        nf("A", "a2", "9", "OFFICER", "p", mv="1"), nf("A", "a2", "9", "OFFICER", "q", mv="2"),
+    ]
+    wp = WidePivotWriter()
+    schemas, buffers, overflow = wp.stream_buffer_and_schema(
+        FakePipeline(fields).run(), max_buffer_rows=1
+    )
+    assert "A" in overflow
+    assert buffers.get("A") == []                       # data dropped
+    assert {"OFFICER_1", "OFFICER_2"} <= set(schemas["A"].columns)  # schema intact

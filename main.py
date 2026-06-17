@@ -63,6 +63,8 @@ def main():
         key_column=config.db_key_column,
         full_sync=config.db_full_sync,
         filters_active=config.db_filters_active,
+        single_pass=config.db_single_pass,
+        single_pass_max_rows=config.db_single_pass_max_rows,
     )
 
     logger.info(f"Writing wide output to the database (mode={config.db_write_mode}, "

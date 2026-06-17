@@ -46,6 +46,7 @@ from typing import Dict, List, Tuple
 # executes *inside* one of these passes, so it is reported as a component.
 # (label, key) — keys are recorded via span()/add(). Declared order = report order.
 _PHASES: List[Tuple[str, str]] = [
+    ("Single pass — stream + normalize + buffer", "pass_single"),
     ("Pass 1 — discover wide schema (stream + normalize)", "pass1_discover_schema"),
     ("Pass 2 — pivot + write to database", "pass2_write"),
 ]

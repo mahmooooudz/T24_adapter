@@ -63,7 +63,9 @@ def build_config() -> T24PipelineConfig:
         # --- Output write behaviour (database sink) ---
         db_output_suffix="_wide",
         db_write_mode="streaming",   # "streaming" (default) | "batching"
-        db_batch_size=500,
+        db_batch_size=1000,
+        db_single_pass=True,         # read+parse+normalize once (Lever 1)
+        db_single_pass_max_rows=200_000,  # per-app buffer cap before two-pass fallback
         db_key_column="recordId",
         db_full_sync=True,           # mirror source deletions (safety-gated)
         db_filters_active=False,     # set True for any narrowed/partial run

@@ -82,6 +82,25 @@ class T24MetadataOrchestrator:
         # the app name, metadata XML in the same key/xml columns).
         self.local_ref_reader = self._make_db_reader(config, config.db_local_ref_table, connection)
         self.customization_reader = self._make_db_reader(config, config.db_customization_table, connection)
+        # Bulk-prefetched metadata maps ({app_name: xml}), filled once on first
+        # use — one query per metadata table instead of one per (table, app).
+        self._prefetched = False
+        self._std_all: dict = {}
+        self._lref_all: dict = {}
+        self._cust_all: dict = {}
+
+    def _ensure_prefetched(self) -> None:
+        """Fetch all rows of each configured metadata table once (3 queries
+        total), not lazily per application."""
+        if self._prefetched:
+            return
+        if self.metadata_reader is not None:
+            self._std_all = self.metadata_reader.fetch_all()
+        if self.local_ref_reader is not None:
+            self._lref_all = self.local_ref_reader.fetch_all()
+        if self.customization_reader is not None:
+            self._cust_all = self.customization_reader.fetch_all()
+        self._prefetched = True
 
     @staticmethod
     def _make_db_reader(config: T24PipelineConfig, table, connection=None):
@@ -109,6 +128,9 @@ class T24MetadataOrchestrator:
         T24MetadataRegistry populated with all available metadata
         """
         relationship_file = self.discovery.get_relationship_file(app_name)
+
+        # Prefetch all metadata tables once (no-op after the first app).
+        self._ensure_prefetched()
 
         # --- STANDARD.SELECTION (database first if configured, else file) ---
         self._load_standard_selection(app_name)
@@ -145,9 +167,9 @@ class T24MetadataOrchestrator:
         If the database is configured but has no row for this app (or the
         table does not exist yet), a warning is logged and the file is used.
         """
-        # 1) Try the database metadata table first.
+        # 1) Try the database metadata table first (from the prefetched map).
         if self.metadata_reader is not None:
-            xml_text = self.metadata_reader.fetch_xml(app_name)
+            xml_text = self._std_all.get(app_name)
             if xml_text:
                 source = (
                     f"{self.config.db_schema}.{self.config.db_metadata_table}"
@@ -181,7 +203,7 @@ class T24MetadataOrchestrator:
         DB row falls back to the file; a missing file is only a warning.
         """
         if self.local_ref_reader is not None:
-            xml_text = self.local_ref_reader.fetch_xml(app_name)
+            xml_text = self._lref_all.get(app_name)
             if xml_text:
                 source = (
                     f"{self.config.db_schema}.{self.config.db_local_ref_table}"
@@ -214,7 +236,7 @@ class T24MetadataOrchestrator:
         Both sources are optional.
         """
         if self.customization_reader is not None:
-            xml_text = self.customization_reader.fetch_xml(app_name)
+            xml_text = self._cust_all.get(app_name)
             if xml_text:
                 source = (
                     f"{self.config.db_schema}.{self.config.db_customization_table}"
@@ -294,6 +316,11 @@ class T24GenericPipeline:
                 schema=config.db_schema,
                 record_column=config.db_record_column,
                 record_id_column=config.record_id_db_column,
+                # Tables that fit (single-pass) are read with a plain cursor
+                # (one round-trip) instead of a server-side streaming cursor.
+                buffered_read_max_rows=(
+                    config.db_single_pass_max_rows if config.db_single_pass else 0
+                ),
             )
             if config.source == "database"
             else None

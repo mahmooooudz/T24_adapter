@@ -48,3 +48,13 @@ def test_both_modes_bulk_upsert_never_per_row():
 def test_batch_size_floor_is_one():
     # Defensive: a negative/zero batching size never produces a non-positive flush.
     assert _w(write_mode="batching", batch_size=0).batch_size == 1
+
+
+def test_single_pass_defaults_on_with_cap():
+    w = _w()
+    assert w.single_pass is True
+    assert w.single_pass_max_rows == 200_000
+
+
+def test_single_pass_can_be_disabled():
+    assert _w(single_pass=False).single_pass is False

@@ -163,7 +163,15 @@ class T24PipelineConfig:
     # Both UPSERT (INSERT ... ON CONFLICT DO UPDATE) on db_key_column, so
     # re-runs update changed rows in place. No truncation.
     db_write_mode: str = "streaming"
-    db_batch_size: int = 500
+    db_batch_size: int = 1000
+
+    # Single-pass write: read+parse+normalize ONCE, buffering per application,
+    # instead of the two-pass discover-then-write. Lossless and byte-identical
+    # output. Bounded by db_single_pass_max_rows per app — an app larger than
+    # that falls back to two-pass streaming (constant memory preserved).
+    # Set db_single_pass=False to force the original two-pass path.
+    db_single_pass: bool = True
+    db_single_pass_max_rows: int = 200_000
 
     # Conflict / sync key column for the result tables (the wide-row key).
     db_key_column: str = "recordId"

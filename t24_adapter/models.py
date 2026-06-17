@@ -79,11 +79,15 @@ class RelationshipMetadata:
     source: Optional[str] = None
 
 
-@dataclass
+@dataclass(slots=True)
 class NormalizedField:
     """
     One normalized output record, representing a single field value
     from a T24 XML data row after metadata resolution.
+
+    Uses __slots__: this is the hot, high-volume object (one per field per
+    record — tens of thousands per run), so slots cut allocation time and
+    memory versus a __dict__-backed dataclass.
 
     Each XML element in a <row> becomes one NormalizedField.
     Multi-values and sub-values each become separate NormalizedField records.
