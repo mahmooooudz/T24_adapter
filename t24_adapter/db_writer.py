@@ -57,12 +57,6 @@ from .wide_writer import WidePivotWriter
 
 logger = logging.getLogger("t24-adapter.db-writer")
 
-# Default flush size for "streaming" mode when no batch size is supplied.
-# Streaming means "bounded memory", NOT "one row per round-trip"; a batch of a
-# few hundred small rows is negligible memory but turns N network round-trips
-# into N/flush. The floor is always >= 1.
-_STREAMING_FLUSH_ROWS = 500
-
 
 class WideDatabaseWriter:
     """
@@ -100,14 +94,11 @@ class WideDatabaseWriter:
         # app (above it, that app falls back to two-pass streaming).
         self.single_pass = single_pass
         self.single_pass_max_rows = single_pass_max_rows
-        # Both modes bulk-upsert in batches. "streaming" used to mean batch=1
-        # (one network round-trip per row) — pathological on a remote DB — so it
-        # now flushes in bounded bulk like "batching". The flush size is always
-        # >= 1; streaming falls back to a sane default when none is given.
-        if write_mode == "batching":
-            self.batch_size = max(1, int(batch_size))
-        else:  # "streaming" (default) and any unknown mode
-            self.batch_size = max(1, int(batch_size)) if batch_size else _STREAMING_FLUSH_ROWS
+        # Both modes bulk-upsert in batches of `batch_size` rows (one network
+        # round-trip per batch). "streaming" used to mean batch=1 — pathological
+        # on a remote DB — so it now behaves identically to "batching". The
+        # floor is 1; pass a sane positive batch_size from config (default 1000).
+        self.batch_size = max(1, int(batch_size)) if batch_size else 500
         self.key_column = key_column
         self.full_sync = full_sync
         # When the (future) Filters feature narrows a run, this must be True so
@@ -115,7 +106,7 @@ class WideDatabaseWriter:
         self.filters_active = filters_active
         self._pivot = WidePivotWriter()
 
-    def write(self, pipeline, schemas=None) -> Dict[str, tuple]:
+    def write(self, pipeline, schemas=None, rows_wrapper=None) -> Dict[str, tuple]:
         """
         Pivot every application and upsert each into its own result table.
 
@@ -131,6 +122,12 @@ class WideDatabaseWriter:
             (e.g. the web console already ran a discovery pass to compute live
             stats), the discovery pass here is SKIPPED — the whole job is one
             discovery + one write instead of two discoveries + one write.
+        rows_wrapper : optional Callable[[Iterator[NormalizedField]],
+            Iterator[NormalizedField]] that wraps the pipeline.run() stream
+            BEFORE it goes into the single-pass scan. The web console uses this
+            to emit per-record progress events and accumulate per-app stats as
+            records flow through. Must yield every field unchanged (or raise to
+            signal a user-requested stop). Ignored on the two-pass path.
 
         Returns
         -------
@@ -140,18 +137,21 @@ class WideDatabaseWriter:
         # When the caller pre-discovered schemas (e.g. the web console), keep the
         # two-pass write that consumes those schemas.
         if schemas is None and self.single_pass:
-            return self._write_single_pass(pipeline)
+            return self._write_single_pass(pipeline, rows_wrapper=rows_wrapper)
         return self._write_two_pass(pipeline, schemas)
 
-    def _write_single_pass(self, pipeline) -> Dict[str, tuple]:
+    def _write_single_pass(self, pipeline, rows_wrapper=None) -> Dict[str, tuple]:
         """
         One traversal: buffer per app while discovering the shape, then bulk
         write from the buffer — no second read. Apps over single_pass_max_rows
         fall back to a two-pass re-stream (memory-bounded).
         """
+        rows = pipeline.run()
+        if rows_wrapper is not None:
+            rows = rows_wrapper(rows)
         with metrics.span("pass_single"):
             schemas, buffers, overflow = self._pivot.stream_buffer_and_schema(
-                pipeline.run(), max_buffer_rows=self.single_pass_max_rows
+                rows, max_buffer_rows=self.single_pass_max_rows
             )
         if not schemas:
             logger.warning("No records discovered; no result tables written.")

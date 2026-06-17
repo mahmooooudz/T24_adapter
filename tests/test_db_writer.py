@@ -45,9 +45,12 @@ def test_both_modes_bulk_upsert_never_per_row():
     assert _w(write_mode="streaming", batch_size=0).batch_size > 1
 
 
-def test_batch_size_floor_is_one():
-    # Defensive: a negative/zero batching size never produces a non-positive flush.
-    assert _w(write_mode="batching", batch_size=0).batch_size == 1
+def test_batch_size_falsy_falls_back_to_sane_default():
+    # Defensive: a 0/None batch_size must NOT collapse to per-row writes
+    # (the original bug). The exact fallback value isn't part of the contract;
+    # what matters is that it's a positive bulk size > 1.
+    assert _w(write_mode="batching", batch_size=0).batch_size > 1
+    assert _w(write_mode="streaming", batch_size=0).batch_size > 1
 
 
 def test_single_pass_defaults_on_with_cap():
