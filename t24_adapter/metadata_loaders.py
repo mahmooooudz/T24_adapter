@@ -17,7 +17,6 @@ Loaders never throw on missing optional attributes; they log and continue.
 from __future__ import annotations
 
 import logging
-import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional

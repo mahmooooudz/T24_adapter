@@ -18,8 +18,6 @@ the pipeline stops and reports all errors before touching data.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import List
 
 from .config import T24PipelineConfig
 from .models import FileValidationResult

@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from typing import List, Optional
 
 from .config import T24PipelineConfig
