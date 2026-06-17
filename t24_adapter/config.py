@@ -173,6 +173,21 @@ class T24PipelineConfig:
     db_single_pass: bool = True
     db_single_pass_max_rows: int = 200_000
 
+    # Per-application parallelism. db_max_workers=1 keeps today's sequential
+    # behaviour byte-for-byte. >1 fans applications out across a thread pool,
+    # each worker owning its OWN read+write connections (psycopg2 connections
+    # are not safe to share across threads). The wall-clock benefit grows with
+    # N applications and per-table size; see THREADING_PLAN.md for projections.
+    db_max_workers: int = 1
+    # Postgres-side query timeout per worker session, in seconds. The only
+    # reliable way to bound a hung query (Python-side thread cancellation
+    # while blocked in libpq is not possible). 0 disables the timeout.
+    db_statement_timeout_s: int = 600
+    # Failure policy when one worker fails:
+    #   "independent" (default) — others keep going; UPSERT makes runs re-runnable.
+    #   "fail-fast"             — first exception cancels pending workers.
+    db_failure_policy: str = "independent"
+
     # Conflict / sync key column for the result tables (the wide-row key).
     db_key_column: str = "recordId"
 

@@ -31,7 +31,7 @@ WideDatabaseWriter(schema=config.db_schema).write(pipeline)
 from __future__ import annotations
 
 import logging
-from typing import Iterator
+from typing import Dict, Iterator, List, Optional
 
 from .config import T24PipelineConfig
 from .discovery import T24PackageDiscovery
@@ -311,6 +311,12 @@ class T24GenericPipeline:
         # the second pass reuses the first pass's registry instead of re-fetching
         # STANDARD.SELECTION/LOCAL.REF/CUSTOMIZATION (3 round-trips per app).
         self._registry_cache: dict = {}
+        # Optional preload state: when set, the corresponding stage is skipped.
+        # Populated by preload() — used by T24WorkerPool to share validation,
+        # discovery and metadata across workers (one fetch for all of them
+        # instead of N duplicates).
+        self._skip_validation: bool = False
+        self._preset_applications: Optional[list] = None
         self.db_reader = (
             T24DatabaseDataReader(
                 schema=config.db_schema,
@@ -347,6 +353,43 @@ class T24GenericPipeline:
     def __exit__(self, *exc):
         self.close()
 
+    # ------------------------------------------------------------------ #
+    # Preload (skip already-done pre-work)
+    # ------------------------------------------------------------------ #
+
+    def preload(
+        self,
+        *,
+        applications: Optional[List[str]] = None,
+        registries: Optional[Dict[str, T24MetadataRegistry]] = None,
+        skip_validation: bool = False,
+    ) -> None:
+        """Inject pre-computed pipeline state so run() can skip the matching
+        stages.
+
+        Used by T24WorkerPool: the pool validates the package, discovers
+        applications, and prefetches all metadata ONCE on the orchestrator
+        thread, then hands those results to every worker. Without this, each
+        of N workers would redo all three independently.
+
+        Parameters
+        ----------
+        applications     : final list of apps run() should process; bypasses
+                           Stage 2 discovery if provided.
+        registries       : {app_name: T24MetadataRegistry}; populates
+                           _registry_cache so Stage 3 metadata is reused
+                           instead of re-fetched.
+        skip_validation  : skip Stage 1 entirely. Safe when the pool has
+                           already validated the package up-front.
+        """
+        if skip_validation:
+            self._skip_validation = True
+        if applications is not None:
+            self._preset_applications = list(applications)
+        if registries:
+            for app, reg in registries.items():
+                self._registry_cache[app.upper()] = reg
+
     def run(self) -> Iterator[NormalizedField]:
         """
         Execute the full pipeline and yield NormalizedField records.
@@ -376,48 +419,57 @@ class T24GenericPipeline:
             self.db_reader._conn = read_conn
 
         # === STAGE 1: Package Validation ===
-        logger.info("=== STAGE 1: Package Validation ===")
-        with metrics.span("validate"):
-            validation_result = self.validator.validate_package()
+        if self._skip_validation:
+            logger.info("=== STAGE 1: Package Validation (skipped — already validated) ===")
+        else:
+            logger.info("=== STAGE 1: Package Validation ===")
+            with metrics.span("validate"):
+                validation_result = self.validator.validate_package()
 
-        if not validation_result.is_valid:
-            for error in validation_result.errors:
-                logger.error(error)
-            raise RuntimeError(
-                f"T24 package validation failed with {len(validation_result.errors)} error(s). "
-                f"Check logs for details."
-            )
+            if not validation_result.is_valid:
+                for error in validation_result.errors:
+                    logger.error(error)
+                raise RuntimeError(
+                    f"T24 package validation failed with {len(validation_result.errors)} error(s). "
+                    f"Check logs for details."
+                )
 
-        for warning in validation_result.warnings:
-            logger.warning(warning)
+            for warning in validation_result.warnings:
+                logger.warning(warning)
 
         # === STAGE 2: Application Discovery ===
-        logger.info("=== STAGE 2: Application Discovery ===")
-        if self.config.source == "database":
-            # Dynamic: every base table in the schema (except the metadata
-            # table) is an application, keyed by its own name. No hardcoding.
-            with metrics.span("discover_apps"):
-                applications = self.db_reader.discover_tables(
-                    exclude={
-                        self.config.db_metadata_table,
-                        self.config.db_local_ref_table,
-                        self.config.db_customization_table,
-                    },
-                    exclude_suffixes=(self.config.db_output_suffix,),
-                )
-            if not applications:
-                raise RuntimeError(
-                    f"No data tables found in schema '{self.config.db_schema}' "
-                    f"(excluding metadata table '{self.config.db_metadata_table}')."
-                )
+        if self._preset_applications is not None:
+            logger.info(
+                "=== STAGE 2: Application Discovery (preloaded — skipping query) ==="
+            )
+            applications = list(self._preset_applications)
         else:
-            with metrics.span("discover_apps"):
-                applications = self.discovery.discover_applications()
-            if not applications:
-                raise RuntimeError(
-                    "No T24 XML data files found in the data directory. "
-                    "Ensure data/*.xml files exist."
-                )
+            logger.info("=== STAGE 2: Application Discovery ===")
+            if self.config.source == "database":
+                # Dynamic: every base table in the schema (except the metadata
+                # table) is an application, keyed by its own name. No hardcoding.
+                with metrics.span("discover_apps"):
+                    applications = self.db_reader.discover_tables(
+                        exclude={
+                            self.config.db_metadata_table,
+                            self.config.db_local_ref_table,
+                            self.config.db_customization_table,
+                        },
+                        exclude_suffixes=(self.config.db_output_suffix,),
+                    )
+                if not applications:
+                    raise RuntimeError(
+                        f"No data tables found in schema '{self.config.db_schema}' "
+                        f"(excluding metadata table '{self.config.db_metadata_table}')."
+                    )
+            else:
+                with metrics.span("discover_apps"):
+                    applications = self.discovery.discover_applications()
+                if not applications:
+                    raise RuntimeError(
+                        "No T24 XML data files found in the data directory. "
+                        "Ensure data/*.xml files exist."
+                    )
 
         # Optional allowlist: narrow to a caller-chosen subset of applications
         # (e.g. the web console's table selection). Matching is case-insensitive.
