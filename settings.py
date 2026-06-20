@@ -67,6 +67,7 @@ def build_config() -> T24PipelineConfig:
         db_single_pass=True,         # read+parse+normalize once (Lever 1)
         db_single_pass_max_rows=200_000,  # per-app buffer cap before two-pass fallback
         db_max_workers=1,            # 1 = sequential; >1 fans apps out across threads
+        db_parallel_min_tables=3,    # parallel only kicks in from this many tables
         db_statement_timeout_s=600,
         db_failure_policy="independent",
         db_key_column="recordId",

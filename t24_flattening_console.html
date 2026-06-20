@@ -170,6 +170,8 @@
   .b-ready,.b-done { background: var(--green-bg); color: var(--green); }
   .b-run { background: var(--blue-bg); color: var(--c1); }
   .b-run::before { animation: blink 1s infinite; }
+  .b-save { background: var(--amber-bg); color: var(--amber); }
+  .b-save::before { animation: blink 1s infinite; }
   @keyframes blink { 50%{opacity:.3} }
   .b-pend { background: #eceef6; color: var(--text-3); }
   .b-warn { background: var(--amber-bg); color: var(--amber); }
@@ -810,16 +812,62 @@ function applySchema(apps){
     tr.dataset.total = total;
   });
 }
+function fmtEta(sec){
+  if (!isFinite(sec) || sec < 0) return '';
+  if (sec < 1) return '<1s';
+  if (sec < 60) return Math.round(sec) + 's';
+  return Math.floor(sec/60) + 'm ' + Math.round(sec%60) + 's';
+}
 function applyProgress(m){
   const tr = rowFor(m.app); if (!tr) return;
   const total = m.total || +tr.dataset.total || 0;
-  const pct = total ? Math.min(100, Math.round(100*m.processed/total)) : (m.status==='done'?100:0);
+  const frac = total ? Math.min(1, m.processed/total) : 0;
+  const now = Date.now();
+
+  // Phase timing: reset the clock at each phase boundary so rate/ETA reflect
+  // the CURRENT phase (read and write have very different throughput).
+  if (tr.dataset.phase !== (m.phase || 'read') && m.status !== 'done'){
+    tr.dataset.phase = m.phase || 'read';
+    tr.dataset.phaseStart = now;
+    tr.dataset.phaseStartProc = m.processed;
+  }
+
+  // Two-segment bar so it never jumps backwards: READ fills 0–50%, WRITE 50–100%.
+  let pct, count, verb;
+  if (m.status === 'done'){
+    pct = 100; count = Number(total).toLocaleString() + ' / ' + Number(total).toLocaleString();
+  } else if (m.phase === 'write'){
+    pct = 50 + Math.round(frac * 50); verb = 'saving';
+    count = Number(m.processed).toLocaleString() + ' / ' + Number(total).toLocaleString();
+  } else {
+    pct = Math.round(frac * 50); verb = 'reading';
+    count = Number(m.processed).toLocaleString() + ' / ' + Number(total).toLocaleString();
+  }
+
+  // Live throughput + ETA for the current phase.
+  let suffix = '';
+  if (m.status !== 'done' && total){
+    const dt = (now - (+tr.dataset.phaseStart || now)) / 1000;
+    const dn = m.processed - (+tr.dataset.phaseStartProc || 0);
+    if (dt > 0.2 && dn > 0){
+      const rate = dn / dt;
+      const eta = (total - m.processed) / rate;
+      suffix = ` · ${Math.round(rate).toLocaleString()}/s · ETA ${fmtEta(eta)}`;
+    }
+  }
+
   tr.querySelector('.pbfill').style.width = pct + '%';
-  tr.querySelector('.rc').textContent = Number(m.processed).toLocaleString() + ' / ' + Number(total).toLocaleString();
+  tr.querySelector('.rc').innerHTML = count +
+    (suffix ? `<span style="color:var(--text-3)">${suffix}</span>` : '');
   tr.dataset.proc = m.processed;
+
   const badge = tr.querySelector('.badge');
-  const map = {running:['b-run','Running'], done:['b-done','Done'], pending:['b-pend','Pending']};
-  const [cls, txt] = map[m.status] || map.pending;
+  // Phase-aware label: "Reading…" during read, "Saving…" during write.
+  let cls, txt;
+  if (m.status === 'done'){ cls = 'b-done'; txt = 'Done'; }
+  else if (m.phase === 'write' || m.status === 'saving'){ cls = 'b-save'; txt = 'Saving…'; }
+  else if (m.status === 'running'){ cls = 'b-run'; txt = 'Reading…'; }
+  else { cls = 'b-pend'; txt = 'Pending'; }
   badge.className = 'badge ' + cls; badge.textContent = txt;
   updateProcessedTotal();
 }

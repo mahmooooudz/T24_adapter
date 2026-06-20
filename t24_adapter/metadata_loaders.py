@@ -72,7 +72,7 @@ class StandardSelectionLoader:
         registry: T24MetadataRegistry
     ) -> None:
         """Load STANDARD.SELECTION metadata from an XML file."""
-        logger.info(f"Loading STANDARD.SELECTION for '{app_name}' from: {file_path.name}")
+        logger.debug(f"Loading STANDARD.SELECTION for '{app_name}' from: {file_path.name}")
         tree = ET.parse(file_path)
         self._register_from_root(
             app_name=app_name,
@@ -96,7 +96,7 @@ class StandardSelectionLoader:
         `<?xml ... encoding=...?>` declaration cannot be passed to
         ET.fromstring directly.
         """
-        logger.info(f"Loading STANDARD.SELECTION for '{app_name}' from: {source}")
+        logger.debug(f"Loading STANDARD.SELECTION for '{app_name}' from: {source}")
         root = ET.fromstring(str(xml_text).encode("utf-8"))
         self._register_from_root(
             app_name=app_name,
@@ -131,7 +131,7 @@ class StandardSelectionLoader:
             )
 
         count = min(len(field_names), len(positions))
-        logger.info(f"  Found {count} field definitions")
+        logger.debug(f"  Found {count} field definitions")
 
         registered = 0
         for index in range(count):
@@ -178,7 +178,7 @@ class StandardSelectionLoader:
                     )
                 )
 
-        logger.info(f"  Registered {registered} fields from STANDARD.SELECTION")
+        logger.debug(f"  Registered {registered} fields from STANDARD.SELECTION")
 
     @staticmethod
     def _get(columns: Dict[str, List[str]], col: str, index: int) -> Optional[str]:
@@ -230,7 +230,7 @@ class LocalReferenceLoader:
         registry: T24MetadataRegistry
     ) -> None:
         """Load LOCAL.REF metadata from an XML file."""
-        logger.info(f"Loading LOCAL.REF for '{app_name}' from: {file_path.name}")
+        logger.debug(f"Loading LOCAL.REF for '{app_name}' from: {file_path.name}")
         tree = ET.parse(file_path)
         self._register_from_root(app_name, tree.getroot(), registry, str(file_path))
 
@@ -246,7 +246,7 @@ class LocalReferenceLoader:
         instead of a file. Encodes to bytes first so an `<?xml ... encoding?>`
         declaration is accepted.
         """
-        logger.info(f"Loading LOCAL.REF for '{app_name}' from: {source}")
+        logger.debug(f"Loading LOCAL.REF for '{app_name}' from: {source}")
         root = ET.fromstring(str(xml_text).encode("utf-8"))
         self._register_from_root(app_name, root, registry, source)
 
@@ -259,7 +259,7 @@ class LocalReferenceLoader:
     ) -> None:
         # Repeated C-column shape is identical to STANDARD.SELECTION; reuse it.
         if self._looks_like_repeated_c_row(root):
-            logger.info("  Detected repeated-column style LOCAL.REF -> delegating to StandardSelectionLoader")
+            logger.debug("  Detected repeated-column style LOCAL.REF -> delegating to StandardSelectionLoader")
             StandardSelectionLoader()._register_from_root(app_name, root, registry, source)
             return
 
@@ -294,7 +294,7 @@ class LocalReferenceLoader:
             registry.register_field(meta)
             registered += 1
 
-        logger.info(f"  Registered {registered} local reference fields")
+        logger.debug(f"  Registered {registered} local reference fields")
 
     @staticmethod
     def _looks_like_repeated_c_row(root: ET.Element) -> bool:
@@ -333,7 +333,7 @@ class CustomizationLoader:
         registry: T24MetadataRegistry
     ) -> None:
         """Load CUSTOMIZATION metadata from an XML file."""
-        logger.info(f"Loading CUSTOMIZATION for '{app_name}' from: {file_path.name}")
+        logger.debug(f"Loading CUSTOMIZATION for '{app_name}' from: {file_path.name}")
         tree = ET.parse(file_path)
         self._register_from_root(app_name, tree.getroot(), registry, str(file_path))
 
@@ -345,7 +345,7 @@ class CustomizationLoader:
         source: str,
     ) -> None:
         """Load CUSTOMIZATION metadata from an XML string (e.g. a database column)."""
-        logger.info(f"Loading CUSTOMIZATION for '{app_name}' from: {source}")
+        logger.debug(f"Loading CUSTOMIZATION for '{app_name}' from: {source}")
         root = ET.fromstring(str(xml_text).encode("utf-8"))
         self._register_from_root(app_name, root, registry, source)
 
@@ -387,7 +387,7 @@ class CustomizationLoader:
             registry.register_field(meta)
             registered += 1
 
-        logger.info(f"  Registered {registered} custom fields")
+        logger.debug(f"  Registered {registered} custom fields")
 
     @staticmethod
     def _get(node: ET.Element, names: List[str]) -> Optional[str]:
@@ -427,7 +427,7 @@ class RelationshipLoader:
         file_path: Path,
         registry: T24MetadataRegistry
     ) -> None:
-        logger.info(f"Loading RELATIONSHIPS for '{app_name}' from: {file_path.name}")
+        logger.debug(f"Loading RELATIONSHIPS for '{app_name}' from: {file_path.name}")
 
         tree = ET.parse(file_path)
         root = tree.getroot()
@@ -459,7 +459,7 @@ class RelationshipLoader:
             )
             registered += 1
 
-        logger.info(f"  Registered {registered} explicit relationships")
+        logger.debug(f"  Registered {registered} explicit relationships")
 
     @staticmethod
     def _child_text(node: ET.Element, names: List[str]) -> Optional[str]:

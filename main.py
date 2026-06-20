@@ -88,7 +88,17 @@ def _run_parallel(config):
         wanted = {a.upper() for a in config.include_applications}
         apps = [a for a in apps if a.upper() in wanted]
 
-    pool = T24WorkerPool(config, _build_writer, max_workers=config.db_max_workers)
+    # Below the threshold, parallelism doesn't pay off — fall back to one worker.
+    workers = config.db_max_workers
+    if len(apps) < config.db_parallel_min_tables:
+        logger.info(
+            f"Parallelism requested (workers={workers}) but only {len(apps)} "
+            f"table(s); using 1 worker (parallel helps from "
+            f"{config.db_parallel_min_tables}+ tables)."
+        )
+        workers = 1
+
+    pool = T24WorkerPool(config, _build_writer, max_workers=workers)
     return pool.run(apps)
 
 

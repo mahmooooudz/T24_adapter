@@ -188,6 +188,100 @@ RUNS: Dict[str, RunState] = {}
 _THREAD_RUN: Dict[int, str] = {}
 _LOCK = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# Connection / metadata warm cache.
+# When the user reaches the table-selection step, we kick off a background
+# warm-up for that connection: discover apps, prefetch + build all metadata
+# registries, and pre-count rows. By the time they hit "Run", the run can skip
+# validation/discovery/metadata entirely (via pipeline.preload) and reuse the
+# counts — overlapping the slow I/O with the human's configuration time.
+# Keyed by a non-secret connection signature; entries expire after WARM_TTL.
+# NOTE: assumes the typical single-user local console; the warm worker reapplies
+# its captured DB_* env before connecting to avoid cross-request bleed.
+WARM: Dict[str, dict] = {}
+_WARM_LOCK = threading.Lock()
+WARM_TTL = 300  # seconds
+_DB_ENV_KEYS = ("DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_URL")
+
+
+def _warm_signature(cfg) -> str:
+    """Non-secret key identifying a connection+schema (no password)."""
+    return "|".join(str(x) for x in (
+        os.environ.get("DB_HOST"), os.environ.get("DB_PORT"),
+        os.environ.get("DB_NAME"), os.environ.get("DB_USER"),
+        cfg.db_schema, cfg.db_metadata_table,
+        cfg.db_local_ref_table, cfg.db_customization_table,
+    ))
+
+
+def _get_warm(sig: str):
+    """Return the ready warm entry for sig if fresh, else None."""
+    with _WARM_LOCK:
+        e = WARM.get(sig)
+    if e and e.get("status") == "ready" and (time.time() - e["ts"]) < WARM_TTL:
+        return e
+    return None
+
+
+def _warm_async(cfg, sig: str, env_snapshot: dict) -> None:
+    """Background warm-up: build per-app metadata registries + row counts so a
+    later run can skip discovery/metadata. Best-effort; failures are recorded
+    and simply mean the run falls back to cold setup."""
+    from psycopg2 import sql
+    from t24_adapter.pipeline import T24GenericPipeline, T24MetadataOrchestrator
+    from t24_adapter.discovery import T24PackageDiscovery
+
+    # Reapply the captured connection env in case other requests changed it.
+    for k, v in env_snapshot.items():
+        if v is not None:
+            os.environ[k] = v
+    try:
+        pipe = T24GenericPipeline(cfg)
+        try:
+            conn = pipe._read_connection()
+            pipe.db_reader._conn = conn
+            apps = pipe.db_reader.discover_tables(
+                exclude={cfg.db_metadata_table, cfg.db_local_ref_table,
+                         cfg.db_customization_table},
+                exclude_suffixes=(cfg.db_output_suffix,),
+            )
+            orch = T24MetadataOrchestrator(cfg, T24PackageDiscovery(cfg), connection=conn)
+            orch._ensure_prefetched()
+            registries = {a.upper(): orch.load_for_application(a) for a in apps}
+            counts = {}
+            with conn.cursor() as cur:
+                for a in apps:
+                    cur.execute(sql.SQL("SELECT count(*) FROM {}.{}").format(
+                        sql.Identifier(cfg.db_schema), sql.Identifier(a)))
+                    counts[a.upper()] = int(cur.fetchone()[0])
+                conn.rollback()
+        finally:
+            pipe.close()
+        with _WARM_LOCK:
+            WARM[sig] = {"status": "ready", "registries": registries,
+                         "counts": counts, "apps": apps, "ts": time.time()}
+        logger.info(f"warm ready: {len(apps)} app(s), metadata + counts cached")
+    except Exception as exc:
+        with _WARM_LOCK:
+            WARM[sig] = {"status": "error", "error": str(exc), "ts": time.time()}
+        logger.warning(f"warm-up failed (run will set up cold): {exc}")
+
+
+def _trigger_warm(cfg) -> None:
+    """Start a background warm-up for cfg's connection unless one is already
+    fresh or in flight. Non-blocking."""
+    sig = _warm_signature(cfg)
+    with _WARM_LOCK:
+        e = WARM.get(sig)
+        fresh = e and e.get("status") in ("ready", "warming") and \
+            (time.time() - e["ts"]) < WARM_TTL
+        if fresh:
+            return
+        WARM[sig] = {"status": "warming", "ts": time.time()}
+    env_snapshot = {k: os.environ.get(k) for k in _DB_ENV_KEYS}
+    threading.Thread(target=_warm_async, args=(cfg, sig, env_snapshot),
+                     daemon=True).start()
+
 
 class _SSELogHandler(logging.Handler):
     """Routes t24-adapter log records to the SSE stream of the active run."""
@@ -378,6 +472,9 @@ def list_tables():
                     tables.append({"name": name, "records": cur.fetchone()[0]})
         finally:
             conn.close()
+        # Warm the connection + metadata in the background while the user picks
+        # tables / format, so the eventual run can skip cold setup.
+        _trigger_warm(cfg)
         return jsonify(ok=True, source="database", tables=tables), 200
 
     except Exception as exc:
@@ -436,13 +533,26 @@ def _run_worker(run: RunState, payload: dict) -> None:
 
         run.log("ok", f"Starting pipeline · {len(tables)} table(s) · format={fmt}")
 
+        # Reuse background-warmed connection state (metadata + counts) if a
+        # fresh warm-up exists for this connection. Removes validation +
+        # discovery + metadata fetch from the run's critical path.
+        warm = _get_warm(_warm_signature(cfg)) if payload.get("source") == "database" else None
+        if warm:
+            regs = {t: warm["registries"][t] for t in tables if t in warm.get("registries", {})}
+            pipeline.preload(applications=tables, registries=regs, skip_validation=True)
+            run.log("ok", "✓ using warmed connection · metadata + row counts ready")
+
         # Stats accumulator — populated DURING the single-pass work by the
         # progress wrapper, so neither path needs a separate discovery scan.
         stats = {t: {"records": 0, "fields": 0, "mapped": 0, "warnings": 0} for t in tables}
 
         # Pre-compute totals (DB: COUNT(*); files: count <row> per XML) so the
-        # progress bar has a denominator before any streaming starts.
-        totals = _resolve_totals(cfg, tables, payload.get("source"))
+        # progress bar has a denominator before any streaming starts. Warm runs
+        # reuse the pre-counted totals; otherwise count now.
+        if warm and warm.get("counts"):
+            totals = {t: warm["counts"].get(t, 0) for t in tables}
+        else:
+            totals = _resolve_totals(cfg, tables, payload.get("source"))
         for t in tables:
             run.apps[t]["total"] = totals.get(t, 0)
             run.apps[t]["processed"] = 0
@@ -550,12 +660,12 @@ def _streaming_progress_wrapper(run, totals, stats):
                 if run.apps.get(a, {}).get("status") != "running":
                     run.apps.setdefault(a, {}).update(status="running")
                     run.emit("progress", app=a, processed=0,
-                             total=totals.get(a, 0), status="running")
+                             total=totals.get(a, 0), status="running", phase="read")
                 # Throttled progress emit.
                 if processed[a] >= next_emit.get(a, 1):
                     run.apps[a]["processed"] = processed[a]
                     run.emit("progress", app=a, processed=processed[a],
-                             total=totals.get(a, 0), status="running")
+                             total=totals.get(a, 0), status="running", phase="read")
                     next_emit[a] = processed[a] + step_for(a)
             s["fields"] += 1
             if f.is_mapped:
@@ -564,13 +674,26 @@ def _streaming_progress_wrapper(run, totals, stats):
                 s["warnings"] += len(f.warnings)
             yield f
 
-        # Final flush: make sure each touched app shows its true final count.
+        # Final flush: each touched app shows its true final READ count (the
+        # read half of the bar is now full; the write half fills next).
         for a, n in processed.items():
             if n and run.apps.get(a, {}).get("processed", 0) != n:
                 run.apps[a]["processed"] = n
                 run.emit("progress", app=a, processed=n,
-                         total=totals.get(a, 0), status="running")
+                         total=totals.get(a, 0), status="running", phase="read")
     return wrap
+
+
+def _write_progress_emitter(run, totals):
+    """Returns a callback (app_name, rows_written) -> None for the writer to
+    fire after each batch flush, emitting a 'saving' progress event so the UI
+    fills the WRITE half of the bar live instead of jumping to done."""
+    def on_write_progress(app_name, written):
+        a = app_name.upper()
+        run.apps.setdefault(a, {}).update(processed=written, status="saving")
+        run.emit("progress", app=a, processed=written,
+                 total=totals.get(a, 0), status="saving", phase="write")
+    return on_write_progress
 
 
 def _make_db_writer(cfg):
@@ -607,7 +730,14 @@ def _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
     run.log("ok", f"{app_name} → {cfg.db_schema}.{table} "
                   f"({upserted} upserted, {deleted} deleted, {cols} cols)")
     run.emit("progress", app=a, processed=upserted,
-             total=run.apps[a].get("total", upserted), status="done")
+             total=run.apps[a].get("total", upserted), status="done", phase="done")
+
+
+def _should_parallelize(max_workers: int, n_tables: int, min_tables: int) -> bool:
+    """Parallelize only when more than one worker is requested AND there are
+    enough tables for read-overlap to outweigh per-run overhead + remote-DB
+    write contention. At a couple of tables, parallel is not faster."""
+    return max_workers > 1 and n_tables >= min_tables
 
 
 def _write_database_streaming(run, cfg, pipeline, tables, totals, stats):
@@ -621,13 +751,22 @@ def _write_database_streaming(run, cfg, pipeline, tables, totals, stats):
       already routes per-thread via _THREAD_RUN, so each worker registers
       itself on enter via set_worker_thread_hooks.
     """
-    if cfg.db_max_workers > 1 and len(tables) > 1:
+    if _should_parallelize(cfg.db_max_workers, len(tables), cfg.db_parallel_min_tables):
         return _write_database_parallel(run, cfg, tables, totals, stats)
+    if cfg.db_max_workers > 1:
+        # Requested but below the threshold where parallelism pays off — at a
+        # few tables the remote-DB write dominates and concurrent writers only
+        # add contention/variance. Run sequentially and say why.
+        run.log("info",
+                f"Parallelism requested (workers={cfg.db_max_workers}) but only "
+                f"{len(tables)} table(s); running sequentially "
+                f"(parallel helps from {cfg.db_parallel_min_tables}+ tables).")
 
     # Sequential path — same code shape as before, simplified.
     db_writer = _make_db_writer(cfg)
     wrap = _streaming_progress_wrapper(run, totals, stats)
-    written = db_writer.write(pipeline, rows_wrapper=wrap)
+    on_write = _write_progress_emitter(run, totals)
+    written = db_writer.write(pipeline, rows_wrapper=wrap, on_write_progress=on_write)
     for app_name, (table, upserted, deleted, cols) in written.items():
         _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
 
@@ -656,17 +795,22 @@ def _write_database_parallel(run, cfg, tables, totals, stats):
 
     set_worker_thread_hooks(_register, _deregister)
 
+    # One write-progress emitter is safe to share across workers: it only does
+    # run.apps[app] / run.emit keyed by app, and each worker handles a distinct
+    # app, so there's no cross-worker state collision (unlike the read wrapper).
+    on_write = _write_progress_emitter(run, totals)
+
     def factory(worker_cfg):
         w = _make_db_writer(worker_cfg)
-        # Each worker gets its OWN wrapper closure — sharing breaks because the
-        # wrapper's last_key flickers across apps when threads interleave.
+        # Each worker gets its OWN read wrapper closure — sharing breaks because
+        # the wrapper's last_key flickers across apps when threads interleave.
         wrap = _streaming_progress_wrapper(run, totals, stats)
-        # Monkey-attach the wrapper so each worker's write() uses it. Equivalent
-        # to passing rows_wrapper= at every call site without changing the pool
-        # API or threading state through additional arguments.
+        # Monkey-attach the wrappers so each worker's write() uses them. Equivalent
+        # to passing them at every call site without changing the pool API.
         original_write = w.write
         def write_with_wrapper(pipe, schemas=None):
-            return original_write(pipe, schemas=schemas, rows_wrapper=wrap)
+            return original_write(pipe, schemas=schemas,
+                                  rows_wrapper=wrap, on_write_progress=on_write)
         w.write = write_with_wrapper
         return w
 
@@ -722,6 +866,10 @@ def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
             continue
 
         out_path = run.output_dir / f"{app_name}_wide.{ext}"
+        app_total = totals.get(app_name, 0)
+        written = 0
+        write_step = max(50, app_total // 100) if app_total else 50
+        next_write_emit = write_step
         with out_path.open("w", newline="", encoding="utf-8") as fh:
             if fmt == "csv":
                 w = csv.DictWriter(fh, fieldnames=schema.columns)
@@ -735,6 +883,13 @@ def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
                 else:
                     rec = {k: (v if v != "" else None) for k, v in row.items()}
                     fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                written += 1
+                # Live write-phase progress (fills the WRITE half of the bar).
+                if written >= next_write_emit:
+                    run.apps[app_name].update(processed=written, status="saving")
+                    run.emit("progress", app=app_name, processed=written,
+                             total=app_total, status="saving", phase="write")
+                    next_write_emit = written + write_step
 
         processed = len(buffers.get(app_name, []))
         st = stats.get(app_name, {})
@@ -750,7 +905,7 @@ def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
         run.log("ok", f"{app_name} complete → {out_path.name} "
                       f"({processed:,} rows, {mapped_pct}% mapped)")
         run.emit("progress", app=app_name, processed=processed,
-                 total=run.apps[app_name]["total"], status="done")
+                 total=run.apps[app_name]["total"], status="done", phase="done")
     pipeline.close()
 
 

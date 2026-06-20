@@ -253,7 +253,7 @@ class T24DatabaseDataReader:
             else:
                 conn.rollback()  # release the read txn on the shared connection
 
-        logger.info(f"Finished streaming. Total records: {record_count}")
+        logger.debug(f"Finished streaming. Total records: {record_count}")
 
     @staticmethod
     def _parse(xml_value: str):
@@ -343,7 +343,7 @@ class T24DatabaseMetadataReader:
                 conn.rollback()
 
         result = {r[0]: r[1] for r in rows if r and r[1]}
-        logger.info(
+        logger.debug(
             f"Prefetched {len(result)} metadata row(s) from "
             f"{self.schema}.{self.table} in one query."
         )

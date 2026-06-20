@@ -105,8 +105,13 @@ class WideDatabaseWriter:
         # the delete-sweep is disabled (a partial run must never delete rows).
         self.filters_active = filters_active
         self._pivot = WidePivotWriter()
+        # Optional callback fired after each batch flush: (app_name, rows_written).
+        # Lets a caller (e.g. the web console) show LIVE write progress instead
+        # of a single jump at the end. Set per-run by write(); default no-op.
+        self._on_write_progress = None
 
-    def write(self, pipeline, schemas=None, rows_wrapper=None) -> Dict[str, tuple]:
+    def write(self, pipeline, schemas=None, rows_wrapper=None,
+              on_write_progress=None) -> Dict[str, tuple]:
         """
         Pivot every application and upsert each into its own result table.
 
@@ -129,10 +134,15 @@ class WideDatabaseWriter:
             records flow through. Must yield every field unchanged (or raise to
             signal a user-requested stop). Ignored on the two-pass path.
 
+        on_write_progress : optional Callable[[str, int], None] invoked after
+            each batch flush with (app_name, cumulative rows written). Lets a
+            caller render live write-phase progress. No-op if not provided.
+
         Returns
         -------
         Dict[app_name, (table_name, upserted, deleted, column_count)]
         """
+        self._on_write_progress = on_write_progress
         # Single-pass is used only when this writer discovers the schema itself.
         # When the caller pre-discovered schemas (e.g. the web console), keep the
         # two-pass write that consumes those schemas.
@@ -435,6 +445,13 @@ class _AppSink:
         metrics.incr("db_roundtrips")
         self.upserted += len(self._batch)
         self._batch = []
+        # Live write-phase progress: report cumulative rows written for this app.
+        cb = self.writer._on_write_progress
+        if cb is not None:
+            try:
+                cb(self.app_name, self.upserted)
+            except Exception:
+                pass  # progress reporting must never break the write
 
     def finalize(self) -> tuple:
         self._flush()

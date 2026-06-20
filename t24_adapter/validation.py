@@ -106,7 +106,7 @@ class T24PackageValidator:
                 f"[CRITICAL] Missing required data directory: {data_path}"
             )
         else:
-            logger.info(f"Data directory found: {data_path}")
+            logger.debug(f"Data directory found: {data_path}")
 
     def _check_metadata_directory(self, result: FileValidationResult) -> None:
         if not self.config.require_standard_selection:
@@ -118,7 +118,7 @@ class T24PackageValidator:
                 f"[CRITICAL] Missing required metadata directory: {metadata_path}"
             )
         else:
-            logger.info(f"Metadata directory found: {metadata_path}")
+            logger.debug(f"Metadata directory found: {metadata_path}")
 
     def _check_xsd_directory(self, result: FileValidationResult) -> None:
         if not self.config.require_xsd:
@@ -153,7 +153,7 @@ class T24PackageValidator:
                     f"[CRITICAL] Malformed XML data file '{xml_file.name}': {error}"
                 )
             else:
-                logger.info(f"  Data file validated: {xml_file.name}")
+                logger.debug(f"  Data file validated: {xml_file.name}")
 
     def _check_metadata_xml_files(self, result: FileValidationResult) -> None:
         metadata_path = self.config.metadata_path()
@@ -168,7 +168,7 @@ class T24PackageValidator:
                     f"[CRITICAL] Malformed metadata XML '{xml_file.name}': {error}"
                 )
             else:
-                logger.info(f"  Metadata file validated: {xml_file.name}")
+                logger.debug(f"  Metadata file validated: {xml_file.name}")
 
     def _check_optional_directories(self, result: FileValidationResult) -> None:
         for dir_name, attr in [
@@ -177,7 +177,7 @@ class T24PackageValidator:
             ("relationships", self.config.relationships_path()),
         ]:
             if attr.exists():
-                logger.info(f"Optional directory found: {attr}")
+                logger.debug(f"Optional directory found: {attr}")
             else:
                 result.warnings.append(
                     f"[INFO] Optional directory not found: {attr}"

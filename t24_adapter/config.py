@@ -179,6 +179,11 @@ class T24PipelineConfig:
     # are not safe to share across threads). The wall-clock benefit grows with
     # N applications and per-table size; see THREADING_PLAN.md for projections.
     db_max_workers: int = 1
+    # Parallelism only helps once per-table READ work dominates the per-run
+    # fixed overhead + write contention. Below this many tables, a run stays
+    # sequential even if db_max_workers > 1 (measured: at 2 tables, parallel is
+    # not faster and adds remote-DB write contention). Tune per deployment.
+    db_parallel_min_tables: int = 3
     # Postgres-side query timeout per worker session, in seconds. The only
     # reliable way to bound a hung query (Python-side thread cancellation
     # while blocked in libpq is not possible). 0 disables the timeout.

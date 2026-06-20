@@ -31,6 +31,7 @@ WideDatabaseWriter(schema=config.db_schema).write(pipeline)
 from __future__ import annotations
 
 import logging
+from time import perf_counter
 from typing import Dict, Iterator, List, Optional
 
 from .config import T24PipelineConfig
@@ -152,7 +153,7 @@ class T24MetadataOrchestrator:
         # --- Validate local reference accessibility ---
         self._validate_local_ref_coverage(app_name)
 
-        logger.info(self.registry.summary(app_name))
+        logger.debug(self.registry.summary(app_name))
         return self.registry
 
     def _load_standard_selection(self, app_name: str) -> None:
@@ -270,7 +271,7 @@ class T24MetadataOrchestrator:
                 f"Add metadata in local_ref/ or metadata/ to resolve them."
             )
         else:
-            logger.info(
+            logger.debug(
                 f"[{app_name}] {len(local_ref_fields)} local reference field(s) registered "
                 f"and accessible for lookup."
             )
@@ -499,7 +500,8 @@ class T24GenericPipeline:
         )
 
         for app_name in applications:
-            logger.info(f"=== Processing Application: {app_name} ===")
+            app_t0 = perf_counter()
+            logger.info(f"━━ {app_name} ━━")
 
             # Resolve the record source for this application. Both branches
             # produce a stream of (record_id, row_element) pairs. In database
@@ -526,19 +528,24 @@ class T24GenericPipeline:
             )
 
             # === STAGE 3: Load Metadata (cached across passes) ===
-            logger.info(f"--- Stage 3: Loading Metadata for {app_name} ---")
             registry = self._registry_cache.get(app_name.upper())
             if registry is None:
+                meta_t0 = perf_counter()
                 with metrics.span("metadata_fetch"):
                     registry = metadata_orchestrator.load_for_application(app_name)
                 self._registry_cache[app_name.upper()] = registry
+                n_fields = len(registry.list_fields(app_name))
+                n_lref = len(registry.list_local_ref_fields(app_name))
+                logger.info(
+                    f"   metadata    {n_fields} fields, {n_lref} local-ref"
+                    f"   ({perf_counter() - meta_t0:.2f}s)"
+                )
             else:
-                logger.info(f"[{app_name}] metadata reused from cache (no re-fetch).")
+                logger.info("   metadata    reused from cache")
 
             # === STAGE 4 & 5: Stream + Normalize ===
-            logger.info(f"--- Stage 4+5: Streaming and Normalizing {app_name} ---")
             normalizer = T24Normalizer(registry=registry, config=self.config)
-
+            read_t0 = perf_counter()
             record_count = 0
             field_count = 0
 
@@ -556,8 +563,9 @@ class T24GenericPipeline:
                     yield normalized_field
 
             logger.info(
-                f"Completed {app_name}: {record_count} record(s), "
-                f"{field_count} normalized field(s)"
+                f"   read+norm   {record_count:,} records, {field_count:,} fields"
+                f"   ({perf_counter() - read_t0:.2f}s)"
             )
+            logger.info(f"   ✓ {app_name} processed in {perf_counter() - app_t0:.2f}s")
 
         logger.info("=== Pipeline Complete ===")
