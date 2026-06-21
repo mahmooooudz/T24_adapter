@@ -653,6 +653,14 @@ function go(n){
   document.getElementById('scur').textContent = n+1;
   document.querySelector('.main').scrollTo({top:0, behavior:'smooth'});
   if (n === 1 && !tablesLoaded) loadTables();
+  // Leaving table selection -> kick off a background read of the chosen tables
+  // so the eventual run skips straight to the write. Idempotent server-side.
+  if (n === 2) triggerPrefetch();
+}
+function triggerPrefetch(){
+  const p = srcPayload();
+  if (p.source !== 'database' || !selected.size) return;
+  api('/api/prefetch', Object.assign(p, {tables: [...selected]})).catch(() => {});
 }
 
 /* ---------- connection ---------- */

@@ -163,7 +163,12 @@ class T24PipelineConfig:
     # Both UPSERT (INSERT ... ON CONFLICT DO UPDATE) on db_key_column, so
     # re-runs update changed rows in place. No truncation.
     db_write_mode: str = "streaming"
-    db_batch_size: int = 1000
+    # Rows per bulk UPSERT round-trip. Measured against the remote DB: 1K→2K
+    # nearly doubles write throughput (fewer round-trips), then it plateaus;
+    # 8K sits in the plateau at ~1.7x the 1K rate. execute_values mogrifies
+    # values into the SQL text, so this is NOT bound by Postgres' 65535-param
+    # limit. Larger batches also mean coarser write-progress ticks.
+    db_batch_size: int = 8000
 
     # Single-pass write: read+parse+normalize ONCE, buffering per application,
     # instead of the two-pass discover-then-write. Lossless and byte-identical

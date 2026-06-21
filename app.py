@@ -283,6 +283,115 @@ def _trigger_warm(cfg) -> None:
                      daemon=True).start()
 
 
+# ---------------------------------------------------------------------------
+# Speculative data prefetch.
+# Once the user has picked tables (and is configuring format/filters), read +
+# normalize + buffer those tables in the background. At run time the data is
+# already in memory, so the run skips straight to the DB write — moving the
+# ~read time off the user's critical path entirely. Keyed by connection
+# signature + the selected table set, so changing the selection starts a fresh
+# prefetch and the old one is ignored.
+PREFETCH: Dict[str, dict] = {}
+_PREFETCH_LOCK = threading.Lock()
+PREFETCH_TTL = 300  # seconds
+
+
+def _prefetch_key(cfg, tables) -> str:
+    return _warm_signature(cfg) + "||" + ",".join(sorted(t.upper() for t in tables))
+
+
+def _stats_accumulator(rows, stats):
+    """Passthrough generator that tallies per-app records/fields/mapped/warnings
+    (so a prefetched run still reports mappedPct + warnings without re-reading)."""
+    last = {"app": None, "rid": object()}
+    for f in rows:
+        a = f.app_name.upper()
+        s = stats.setdefault(a, {"records": 0, "fields": 0, "mapped": 0, "warnings": 0})
+        if a != last["app"] or f.record_id != last["rid"]:
+            s["records"] += 1
+            last["app"] = a
+            last["rid"] = f.record_id
+        s["fields"] += 1
+        if f.is_mapped:
+            s["mapped"] += 1
+        if f.warnings:
+            s["warnings"] += len(f.warnings)
+        yield f
+
+
+def _get_prefetch(key: str, wait_timeout: float = 0):
+    """Return the ready+fresh prefetch entry for key, or None.
+    If it's still reading and wait_timeout>0, JOIN the in-flight prefetch
+    (wait for it) rather than starting a duplicate read."""
+    with _PREFETCH_LOCK:
+        e = PREFETCH.get(key)
+    if not e:
+        return None
+    if e.get("status") == "reading" and wait_timeout > 0:
+        e["event"].wait(wait_timeout)
+        with _PREFETCH_LOCK:
+            e = PREFETCH.get(key)
+    if e and e.get("status") == "ready" and (time.time() - e["ts"]) < PREFETCH_TTL:
+        return e
+    return None
+
+
+def _prefetch_async(cfg, key: str, tables, env_snapshot: dict) -> None:
+    """Background read+normalize+buffer of `tables`. Stores schemas+buffers+stats
+    for the run to write directly. Best-effort: any failure (incl. a table too
+    big to buffer) just means the run reads normally."""
+    for k, v in env_snapshot.items():
+        if v is not None:
+            os.environ[k] = v
+    stats = {t: {"records": 0, "fields": 0, "mapped": 0, "warnings": 0} for t in tables}
+    try:
+        from t24_adapter import T24GenericPipeline, WidePivotWriter
+        pipe = T24GenericPipeline(cfg)
+        warm = _get_warm(_warm_signature(cfg))
+        regs = ({t: warm["registries"][t] for t in tables if t in warm.get("registries", {})}
+                if warm else {})
+        pipe.preload(applications=list(tables), registries=regs, skip_validation=True)
+        pivot = WidePivotWriter()
+        schemas, buffers, overflow = pivot.stream_buffer_and_schema(
+            _stats_accumulator(pipe.run(), stats),
+            max_buffer_rows=cfg.db_single_pass_max_rows,
+        )
+        pipe.close()
+        if overflow:
+            raise RuntimeError(f"tables too large to buffer: {sorted(overflow)}")
+        with _PREFETCH_LOCK:
+            ev = PREFETCH.get(key, {}).get("event") or threading.Event()
+            PREFETCH[key] = {"status": "ready", "schemas": schemas, "buffers": buffers,
+                             "stats": stats, "ts": time.time(), "event": ev}
+            ev.set()
+        rows = sum(len(b) for b in buffers.values())
+        logger.info(f"prefetch ready: {rows:,} rows buffered for {sorted(tables)}")
+    except Exception as exc:
+        with _PREFETCH_LOCK:
+            ev = PREFETCH.get(key, {}).get("event") or threading.Event()
+            PREFETCH[key] = {"status": "error", "error": str(exc),
+                             "ts": time.time(), "event": ev}
+            ev.set()
+        logger.warning(f"prefetch failed (run will read normally): {exc}")
+
+
+def _trigger_prefetch(cfg, tables) -> None:
+    """Kick off a background prefetch for the selected tables unless a fresh one
+    (ready or in flight) already exists for the same connection+selection."""
+    if not tables:
+        return
+    key = _prefetch_key(cfg, tables)
+    with _PREFETCH_LOCK:
+        e = PREFETCH.get(key)
+        if e and e.get("status") in ("reading", "ready") and \
+                (time.time() - e["ts"]) < PREFETCH_TTL:
+            return
+        PREFETCH[key] = {"status": "reading", "ts": time.time(), "event": threading.Event()}
+    env_snapshot = {k: os.environ.get(k) for k in _DB_ENV_KEYS}
+    threading.Thread(target=_prefetch_async, args=(cfg, key, list(tables), env_snapshot),
+                     daemon=True).start()
+
+
 class _SSELogHandler(logging.Handler):
     """Routes t24-adapter log records to the SSE stream of the active run."""
 
@@ -482,6 +591,27 @@ def list_tables():
         return jsonify(ok=False, message=f"{type(exc).__name__}: {exc}"), 200
 
 
+@app.route("/api/prefetch", methods=["POST"])
+def prefetch():
+    """Start a background read+buffer of the selected tables (database mode).
+    Called when the user advances past table selection, so the eventual run
+    can skip the read. Returns immediately; idempotent per selection."""
+    payload = request.get_json(force=True) or {}
+    if payload.get("source") != "database":
+        return jsonify(ok=True, prefetch=False, reason="files mode"), 200
+    tables = [t.upper() for t in (payload.get("tables") or [])]
+    if not tables:
+        return jsonify(ok=True, prefetch=False, reason="no tables"), 200
+    try:
+        _apply_db_env(payload.get("conn", {}))
+        cfg = _build_config(payload)
+        _trigger_prefetch(cfg, tables)
+        return jsonify(ok=True, prefetch=True, tables=tables), 200
+    except Exception as exc:
+        logger.warning(f"prefetch trigger failed: {exc}")
+        return jsonify(ok=True, prefetch=False, reason=str(exc)), 200
+
+
 # ====================================================================== #
 # Run execution
 # ====================================================================== #
@@ -559,9 +689,24 @@ def _run_worker(run: RunState, payload: dict) -> None:
             run.apps[t]["status"] = "pending"
         run.emit("schema", apps={t: run.apps[t]["total"] for t in tables})
 
-        # Both sinks (DB / files) now flow through the SAME single-pass shape:
-        # one source read, streaming progress emitted by _streaming_progress_wrapper.
-        if fmt == "db":
+        # Speculative prefetch: if the data was read+buffered in the background
+        # while the user configured, write directly — the read is already done.
+        # The prefetch is keyed by the INPUT source + tables (format-agnostic),
+        # so it applies to BOTH database and file output. Joins an in-flight
+        # prefetch rather than starting a duplicate read.
+        prefetched = (_get_prefetch(_prefetch_key(cfg, tables), wait_timeout=180)
+                      if payload.get("source") == "database" else None)
+
+        if prefetched:
+            run.log("ok", "✓ data prefetched during setup · skipping read, writing only")
+            for a, s in prefetched.get("stats", {}).items():
+                stats[a] = s
+            pipeline.close()  # the prefetch already read; this pipeline is unused
+            if fmt == "db":
+                _write_database_prefetched(run, cfg, tables, totals, stats, prefetched)
+            else:
+                _write_files_prefetched(run, cfg, tables, totals, stats, prefetched, fmt)
+        elif fmt == "db":
             _write_database_streaming(run, cfg, pipeline, tables, totals, stats)
         else:
             _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt)
@@ -643,7 +788,8 @@ def _streaming_progress_wrapper(run, totals, stats):
         return max(50, total // 100) if total else 50
 
     def wrap(rows):
-        nonlocal processed, next_emit
+        # processed / next_emit are mutated in place (dict items), not rebound,
+        # so no `nonlocal` is needed.
         for f in rows:
             if run.stop.is_set():
                 raise _Stopped()
@@ -731,6 +877,22 @@ def _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
                   f"({upserted} upserted, {deleted} deleted, {cols} cols)")
     run.emit("progress", app=a, processed=upserted,
              total=run.apps[a].get("total", upserted), status="done", phase="done")
+
+
+def _write_database_prefetched(run, cfg, tables, totals, stats, pf):
+    """Write tables whose data was already read+buffered by a background
+    prefetch. No source read — the read half of the bar is already complete,
+    so we mark it full and then stream the WRITE half live."""
+    # Read was done in the background: show the read half complete instantly.
+    for t in tables:
+        run.apps[t].update(processed=totals.get(t, 0), status="running")
+        run.emit("progress", app=t, processed=totals.get(t, 0),
+                 total=totals.get(t, 0), status="running", phase="read")
+    db_writer = _make_db_writer(cfg)
+    on_write = _write_progress_emitter(run, totals)
+    written = db_writer.write_prebuilt(pf["schemas"], pf["buffers"], on_write_progress=on_write)
+    for app_name, (table, upserted, deleted, cols) in written.items():
+        _record_db_result(run, cfg, app_name, table, upserted, deleted, cols, stats)
 
 
 def _should_parallelize(max_workers: int, n_tables: int, min_tables: int) -> bool:
@@ -835,20 +997,36 @@ def _write_database_parallel(run, cfg, tables, totals, stats):
 
 def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
     """Files sink, single-pass: stream + normalize + buffer ONCE (progress
-    emitted live by the same wrapper DB mode uses), then write each app's
-    buffered rows to its own CSV/JSONL.
-
-    Same shape as _write_database_streaming, just a different sink at the end.
-    """
-    import csv
-    import json
-
+    emitted live), then write each app's buffered rows to its own CSV/JSONL."""
     pivot = WidePivotWriter()
     wrap = _streaming_progress_wrapper(run, totals, stats)
-    rows = wrap(pipeline.run())
     schemas, buffers, overflow = pivot.stream_buffer_and_schema(
-        rows, max_buffer_rows=cfg.db_single_pass_max_rows,
+        wrap(pipeline.run()), max_buffer_rows=cfg.db_single_pass_max_rows,
     )
+    pipeline.close()
+    _write_buffers_to_files(run, tables, totals, stats, pivot,
+                            schemas, buffers, overflow, fmt)
+
+
+def _write_files_prefetched(run, cfg, tables, totals, stats, pf, fmt):
+    """Files sink using data already read+buffered by a background prefetch —
+    no source read. Mirrors _write_database_prefetched but writes CSV/JSONL."""
+    # Read happened in the background: show the read half complete instantly.
+    for t in tables:
+        run.apps[t].update(processed=totals.get(t, 0), status="running")
+        run.emit("progress", app=t, processed=totals.get(t, 0),
+                 total=totals.get(t, 0), status="running", phase="read")
+    _write_buffers_to_files(run, tables, totals, stats, WidePivotWriter(),
+                            pf["schemas"], pf["buffers"], set(), fmt)
+
+
+def _write_buffers_to_files(run, tables, totals, stats, pivot,
+                            schemas, buffers, overflow, fmt):
+    """Shared sink: write per-app buffered wide rows to CSV/JSONL, emitting
+    live write-phase progress. Used by both the read-then-write path and the
+    prefetched path."""
+    import csv
+    import json
 
     run.output_dir.mkdir(parents=True, exist_ok=True)
     ext = "csv" if fmt == "csv" else "jsonl"
@@ -906,7 +1084,6 @@ def _write_files_streaming(run, cfg, pipeline, tables, totals, stats, fmt):
                       f"({processed:,} rows, {mapped_pct}% mapped)")
         run.emit("progress", app=app_name, processed=processed,
                  total=run.apps[app_name]["total"], status="done", phase="done")
-    pipeline.close()
 
 
 

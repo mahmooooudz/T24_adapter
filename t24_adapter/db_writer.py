@@ -173,13 +173,7 @@ class WideDatabaseWriter:
         try:
             with metrics.span("pass2_write"):
                 # Buffered apps: write directly, no re-read.
-                for app_name, schema in schemas.items():
-                    if app_name in overflow:
-                        continue
-                    sink = _AppSink(self, conn, app_name, schema)
-                    for rid, values in buffers.get(app_name, []):
-                        sink.add(self._pivot.wide_row_from_buffer(rid, values, schema, app_name))
-                    results[app_name] = sink.finalize()
+                self._write_buffered(schemas, buffers, overflow, conn, results)
                 # Overflow apps (too large to buffer): re-stream just those.
                 if overflow:
                     results.update(self._write_overflow(pipeline, schemas, overflow, conn))
@@ -189,6 +183,38 @@ class WideDatabaseWriter:
         finally:
             conn.close()
             pipeline.close()
+        return results
+
+    def _write_buffered(self, schemas, buffers, overflow, conn, results) -> None:
+        """Write the non-overflow buffered apps from their {position:[values]}
+        buffers. Shared by single-pass and the prebuilt (prefetched) path."""
+        for app_name, schema in schemas.items():
+            if app_name in overflow:
+                continue
+            sink = _AppSink(self, conn, app_name, schema)
+            for rid, values in buffers.get(app_name, []):
+                sink.add(self._pivot.wide_row_from_buffer(rid, values, schema, app_name))
+            results[app_name] = sink.finalize()
+
+    def write_prebuilt(self, schemas, buffers, on_write_progress=None) -> Dict[str, tuple]:
+        """Write rows that were already read, normalized, buffered and
+        schema-discovered elsewhere — e.g. a speculative background prefetch
+        that ran while the user was still configuring. NO source read happens
+        here; only the DB write. Assumes the prefetch covered only bufferable
+        apps (no overflow)."""
+        self._on_write_progress = on_write_progress
+        if not schemas:
+            return {}
+        results: Dict[str, tuple] = {}
+        conn = _connect_from_env()
+        try:
+            with metrics.span("pass2_write"):
+                self._write_buffered(schemas, buffers, set(), conn, results)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         return results
 
     def _write_overflow(self, pipeline, schemas, overflow, conn) -> Dict[str, tuple]:

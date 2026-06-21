@@ -63,7 +63,7 @@ def build_config() -> T24PipelineConfig:
         # --- Output write behaviour (database sink) ---
         db_output_suffix="_wide",
         db_write_mode="streaming",   # "streaming" (default) | "batching"
-        db_batch_size=1000,
+        db_batch_size=8000,          # rows per bulk UPSERT round-trip (~1.7x vs 1K)
         db_single_pass=True,         # read+parse+normalize once (Lever 1)
         db_single_pass_max_rows=200_000,  # per-app buffer cap before two-pass fallback
         db_max_workers=1,            # 1 = sequential; >1 fans apps out across threads
